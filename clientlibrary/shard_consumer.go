@@ -36,11 +36,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	//chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
-	//"github.com/vmware/vmware-go-kcl/clientlibrary/config"
-	//kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
-	//"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
-	//par "github.com/vmware/vmware-go-kcl/clientlibrary/partition"
 )
 
 const (
@@ -78,10 +73,12 @@ type ExtendedSequenceNumber struct {
 type ShardStatus struct {
 	ID            string
 	ParentShardId string
-	Checkpoint    string
-	AssignedTo    string
-	Mux           *sync.Mutex
-	LeaseTimeout  time.Time
+
+	// Checkpoint is the last checkpoint.
+	Checkpoint   string
+	AssignedTo   string
+	Mux          *sync.Mutex
+	LeaseTimeout time.Time
 	// Shard Range
 	StartingSequenceNumber string
 	// child shard doesn't have end sequence number
@@ -109,7 +106,7 @@ type ShardConsumer struct {
 	shard           *ShardStatus
 	kc              kinesisiface.KinesisAPI
 	checkpointer    Checkpointer
-	recordProcessor IRecordProcessor
+	recordProcessor RecordProcessor
 	kclConfig       *KinesisClientLibConfiguration
 	stop            *chan struct{}
 	consumerID      string
@@ -193,15 +190,15 @@ func (sc *ShardConsumer) getRecords(shard *ShardStatus) error {
 	}
 
 	// Start processing events and notify record processor on shard and starting checkpoint
-	input := &InitializationInput{
+	sc.recordProcessor.Initialize(&InitializationInput{
 		ShardId:                shard.ID,
 		ExtendedSequenceNumber: &ExtendedSequenceNumber{SequenceNumber: aws.String(shard.Checkpoint)},
-	}
-	sc.recordProcessor.Initialize(input)
+	})
 
 	recordCheckpointer := NewRecordProcessorCheckpoint(shard, sc.checkpointer)
 	retriedErrors := 0
 
+	// TODO: add timeout
 	for {
 		if time.Now().UTC().After(shard.LeaseTimeout.Add(-time.Duration(sc.kclConfig.LeaseRefreshPeriodMillis) * time.Millisecond)) {
 			log.Debugf("Refreshing lease on shard: %s for worker: %s", shard.ID, sc.consumerID)
@@ -243,8 +240,8 @@ func (sc *ShardConsumer) getRecords(shard *ShardStatus) error {
 		}
 
 		// Convert from nanoseconds to milliseconds
-		getRecordsTime := time.Since(getRecordsStartTime) / 1000000
-		sc.mService.RecordGetRecordsTime(shard.ID, float64(getRecordsTime))
+		getRecordsTimeMS := time.Since(getRecordsStartTime) / 1000000
+		sc.mService.RecordGetRecordsTime(shard.ID, float64(getRecordsTimeMS))
 
 		// reset the retry count after success
 		retriedErrors = 0

@@ -45,16 +45,16 @@ import (
 )
 
 /**
- * Worker is the high level class that Kinesis applications use to start processing data. It initializes and oversees
+ * Consumer is the high level class that Kinesis applications use to start processing data. It initializes and oversees
  * different components (e.g. syncing shard and lease information, tracking shard assignments, and processing data from
  * the shards).
  */
-type Worker struct {
+type Consumer struct {
 	streamName string
 	regionName string
 	workerID   string
 
-	processorFactory IRecordProcessorFactory
+	processorFactory func() RecordProcessor
 	kclConfig        *KinesisClientLibConfiguration
 	kc               kinesisiface.KinesisAPI
 	checkpointer     Checkpointer
@@ -69,8 +69,8 @@ type Worker struct {
 	shardStatus map[string]*ShardStatus
 }
 
-// NewWorker constructs a Worker instance for processing Kinesis stream data.
-func NewWorker(factory IRecordProcessorFactory, kclConfig *KinesisClientLibConfiguration) *Worker {
+// NewConsumer constructs a Worker instance for processing Kinesis stream data.
+func NewConsumer(factory func() RecordProcessor, kclConfig *KinesisClientLibConfiguration) *Consumer {
 	mService := kclConfig.MonitoringService
 	if mService == nil {
 		// Replaces nil with noop monitor service (not emitting any metrics).
@@ -80,7 +80,7 @@ func NewWorker(factory IRecordProcessorFactory, kclConfig *KinesisClientLibConfi
 	// Create a pseudo-random number generator and seed it.
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	return &Worker{
+	return &Consumer{
 		streamName:       kclConfig.StreamName,
 		regionName:       kclConfig.RegionName,
 		workerID:         kclConfig.WorkerID,
@@ -93,64 +93,64 @@ func NewWorker(factory IRecordProcessorFactory, kclConfig *KinesisClientLibConfi
 }
 
 // WithKinesis is used to provide Kinesis service for either custom implementation or unit testing.
-func (w *Worker) WithKinesis(svc kinesisiface.KinesisAPI) *Worker {
-	w.kc = svc
-	return w
+func (c *Consumer) WithKinesis(svc kinesisiface.KinesisAPI) *Consumer {
+	c.kc = svc
+	return c
 }
 
 // WithCheckpointer is used to provide a custom checkpointer service for non-dynamodb implementation
 // or unit testing.
-func (w *Worker) WithCheckpointer(checker Checkpointer) *Worker {
-	w.checkpointer = checker
-	return w
+func (c *Consumer) WithCheckpointer(checker Checkpointer) *Consumer {
+	c.checkpointer = checker
+	return c
 }
 
 // Run starts consuming data from the stream, and pass it to the application record processors.
-func (w *Worker) Start() error {
-	log := w.kclConfig.Logger
-	if err := w.initialize(); err != nil {
+func (c *Consumer) Start() error {
+	log := c.kclConfig.Logger
+	if err := c.initialize(); err != nil {
 		log.Errorf("Failed to initialize Worker: %+v", err)
 		return err
 	}
 
 	// Start monitoring service
 	log.Infof("Starting monitoring service.")
-	if err := w.mService.Start(); err != nil {
+	if err := c.mService.Start(); err != nil {
 		log.Errorf("Failed to start monitoring service: %+v", err)
 		return err
 	}
 
 	log.Infof("Starting worker event loop.")
-	w.waitGroup.Add(1)
+	c.waitGroup.Add(1)
 	go func() {
-		defer w.waitGroup.Done()
+		defer c.waitGroup.Done()
 		// entering event loop
-		w.eventLoop()
+		c.eventLoop()
 	}()
 	return nil
 }
 
 // Shutdown signals worker to shutdown. Worker will try initiating shutdown of all record processors.
-func (w *Worker) Shutdown() {
-	log := w.kclConfig.Logger
+func (c *Consumer) Shutdown() {
+	log := c.kclConfig.Logger
 	log.Infof("Worker shutdown in requested.")
 
-	if w.done {
+	if c.done {
 		return
 	}
 
-	close(*w.stop)
-	w.done = true
-	w.waitGroup.Wait()
+	close(*c.stop)
+	c.done = true
+	c.waitGroup.Wait()
 
-	w.mService.Shutdown()
+	c.mService.Shutdown()
 	log.Infof("Worker loop is complete. Exiting from worker.")
 }
 
 // Publish to write some data into stream. This function is mainly used for testing purpose.
-func (w *Worker) Publish(streamName, partitionKey string, data []byte) error {
-	log := w.kclConfig.Logger
-	_, err := w.kc.PutRecord(&kinesis.PutRecordInput{
+func (c *Consumer) Publish(streamName, partitionKey string, data []byte) error {
+	log := c.kclConfig.Logger
+	_, err := c.kc.PutRecord(&kinesis.PutRecordInput{
 		Data:         data,
 		StreamName:   aws.String(streamName),
 		PartitionKey: aws.String(partitionKey),
@@ -162,55 +162,55 @@ func (w *Worker) Publish(streamName, partitionKey string, data []byte) error {
 }
 
 // initialize
-func (w *Worker) initialize() error {
-	log := w.kclConfig.Logger
+func (c *Consumer) initialize() error {
+	log := c.kclConfig.Logger
 	log.Infof("Worker initialization in progress...")
 
 	// Create default Kinesis session
-	if w.kc == nil {
+	if c.kc == nil {
 		// create session for Kinesis
 		log.Infof("Creating Kinesis session")
 
 		s, err := session.NewSession(&aws.Config{
-			Region:      aws.String(w.regionName),
-			Endpoint:    &w.kclConfig.KinesisEndpoint,
-			Credentials: w.kclConfig.KinesisCredentials,
+			Region:      aws.String(c.regionName),
+			Endpoint:    &c.kclConfig.KinesisEndpoint,
+			Credentials: c.kclConfig.KinesisCredentials,
 		})
 
 		if err != nil {
 			// no need to move forward
 			log.Fatalf("Failed in getting Kinesis session for creating Worker: %+v", err)
 		}
-		w.kc = kinesis.New(s)
+		c.kc = kinesis.New(s)
 	} else {
 		log.Infof("Use custom Kinesis service.")
 	}
 
 	// Create default dynamodb based checkpointer implementation
-	if w.checkpointer == nil {
+	if c.checkpointer == nil {
 		log.Infof("Creating DynamoDB based checkpointer")
-		w.checkpointer = NewDynamoCheckpoint(w.kclConfig)
+		c.checkpointer = NewDynamoCheckpoint(c.kclConfig)
 	} else {
 		log.Infof("Use custom checkpointer implementation.")
 	}
 
-	err := w.mService.Init(w.kclConfig.ApplicationName, w.streamName, w.workerID)
+	err := c.mService.Init(c.kclConfig.ApplicationName, c.streamName, c.workerID)
 	if err != nil {
 		log.Errorf("Failed to start monitoring service: %+v", err)
 	}
 
 	log.Infof("Initializing Checkpointer")
-	if err := w.checkpointer.Init(); err != nil {
+	if err := c.checkpointer.Init(); err != nil {
 		log.Errorf("Failed to start Checkpointer: %+v", err)
 		return err
 	}
 
-	w.shardStatus = make(map[string]*ShardStatus)
+	c.shardStatus = make(map[string]*ShardStatus)
 
 	stopChan := make(chan struct{})
-	w.stop = &stopChan
+	c.stop = &stopChan
 
-	w.waitGroup = &sync.WaitGroup{}
+	c.waitGroup = &sync.WaitGroup{}
 
 	log.Infof("Initialization complete.")
 
@@ -218,58 +218,56 @@ func (w *Worker) initialize() error {
 }
 
 // newShardConsumer to create a shard consumer instance
-func (w *Worker) newShardConsumer(shard *ShardStatus) *ShardConsumer {
+func (c *Consumer) newShardConsumer(shard *ShardStatus) *ShardConsumer {
 	return &ShardConsumer{
-		streamName:      w.streamName,
+		streamName:      c.streamName,
 		shard:           shard,
-		kc:              w.kc,
-		checkpointer:    w.checkpointer,
-		recordProcessor: w.processorFactory.CreateProcessor(),
-		kclConfig:       w.kclConfig,
-		consumerID:      w.workerID,
-		stop:            w.stop,
-		mService:        w.mService,
+		kc:              c.kc,
+		checkpointer:    c.checkpointer,
+		recordProcessor: c.processorFactory(),
+		kclConfig:       c.kclConfig,
+		consumerID:      c.workerID,
+		stop:            c.stop,
+		mService:        c.mService,
 		state:           WAITING_ON_PARENT_SHARDS,
 	}
 }
 
 // eventLoop
-func (w *Worker) eventLoop() {
-	log := w.kclConfig.Logger
-
+func (c *Consumer) eventLoop() {
+	log := c.kclConfig.Logger
+	// Add [-50%, +50%] random jitter to ShardSyncIntervalMillis. When multiple workers
+	// starts at the same time, this decreases the probability of them calling
+	// kinesis.DescribeStream at the same time, and hit the hard-limit on aws API calls.
+	// On average the period remains the same so that doesn't affect behavior.
+	shardSyncSleep := c.kclConfig.ShardSyncIntervalMillis/2 + c.rng.Intn(int(c.kclConfig.ShardSyncIntervalMillis))
 	for {
-		// Add [-50%, +50%] random jitter to ShardSyncIntervalMillis. When multiple workers
-		// starts at the same time, this decreases the probability of them calling
-		// kinesis.DescribeStream at the same time, and hit the hard-limit on aws API calls.
-		// On average the period remains the same so that doesn't affect behavior.
-		shardSyncSleep := w.kclConfig.ShardSyncIntervalMillis/2 + w.rng.Intn(int(w.kclConfig.ShardSyncIntervalMillis))
-
-		err := w.syncShard()
+		err := c.syncShard()
 		if err != nil {
 			log.Errorf("Error syncing shards: %+v, Retrying in %d ms...", err, shardSyncSleep)
 			time.Sleep(time.Duration(shardSyncSleep) * time.Millisecond)
 			continue
 		}
 
-		log.Infof("Found %d shards", len(w.shardStatus))
+		log.Infof("Found %d shards", len(c.shardStatus))
 
 		// Count the number of leases hold by this worker excluding the processed shard
 		counter := 0
-		for _, shard := range w.shardStatus {
-			if shard.GetLeaseOwner() == w.workerID && shard.Checkpoint != SHARD_END {
+		for _, shard := range c.shardStatus {
+			if shard.GetLeaseOwner() == c.workerID && shard.Checkpoint != SHARD_END {
 				counter++
 			}
 		}
 
 		// max number of lease has not been reached yet
-		if counter < w.kclConfig.MaxLeasesForWorker {
-			for _, shard := range w.shardStatus {
+		if counter < c.kclConfig.MaxLeasesForWorker {
+			for _, shard := range c.shardStatus {
 				// already owner of the shard
-				if shard.GetLeaseOwner() == w.workerID {
+				if shard.GetLeaseOwner() == c.workerID {
 					continue
 				}
 
-				err := w.checkpointer.FetchCheckpoint(shard)
+				err := c.checkpointer.FetchCheckpoint(shard)
 				if err != nil {
 					// checkpoint may not existed yet is not an error condition.
 					if err != ErrSequenceIDNotFound {
@@ -284,7 +282,7 @@ func (w *Worker) eventLoop() {
 					continue
 				}
 
-				err = w.checkpointer.GetLease(shard, w.workerID)
+				err = c.checkpointer.GetLease(shard, c.workerID)
 				if err != nil {
 					// cannot get lease on the shard
 					if err.Error() != ErrLeaseNotAquired {
@@ -294,13 +292,13 @@ func (w *Worker) eventLoop() {
 				}
 
 				// log metrics on got lease
-				w.mService.LeaseGained(shard.ID)
+				c.mService.LeaseGained(shard.ID)
 
 				log.Infof("Start Shard Consumer for shard: %v", shard.ID)
-				sc := w.newShardConsumer(shard)
-				w.waitGroup.Add(1)
+				sc := c.newShardConsumer(shard)
+				c.waitGroup.Add(1)
 				go func() {
-					defer w.waitGroup.Done()
+					defer c.waitGroup.Done()
 					if err := sc.getRecords(shard); err != nil {
 						log.Errorf("Error in getRecords: %+v", err)
 					}
@@ -311,7 +309,7 @@ func (w *Worker) eventLoop() {
 		}
 
 		select {
-		case <-*w.stop:
+		case <-*c.stop:
 			log.Infof("Shutting down...")
 			return
 		case <-time.After(time.Duration(shardSyncSleep) * time.Millisecond):
@@ -322,25 +320,25 @@ func (w *Worker) eventLoop() {
 
 // List all ACTIVE shard and store them into shardStatus table
 // If shard has been removed, need to exclude it from cached shard status.
-func (w *Worker) getShardIDs(startShardID string, shardInfo map[string]bool) error {
-	log := w.kclConfig.Logger
+func (c *Consumer) getShardIDs(startShardID string, shardInfo map[string]bool) error {
+	log := c.kclConfig.Logger
 	// The default pagination limit is 100.
 	args := &kinesis.DescribeStreamInput{
-		StreamName: aws.String(w.streamName),
+		StreamName: aws.String(c.streamName),
 	}
 
 	if startShardID != "" {
 		args.ExclusiveStartShardId = aws.String(startShardID)
 	}
 
-	streamDesc, err := w.kc.DescribeStream(args)
+	streamDesc, err := c.kc.DescribeStream(args)
 	if err != nil {
-		log.Errorf("Error in DescribeStream: %s Error: %+v Request: %s", w.streamName, err, args)
+		log.Errorf("Error in DescribeStream: %s Error: %+v Request: %s", c.streamName, err, args)
 		return err
 	}
 
 	if *streamDesc.StreamDescription.StreamStatus != "ACTIVE" {
-		log.Warnf("Stream %s is not active", w.streamName)
+		log.Warnf("Stream %s is not active", c.streamName)
 		return errors.New("stream not active")
 	}
 
@@ -350,9 +348,9 @@ func (w *Worker) getShardIDs(startShardID string, shardInfo map[string]bool) err
 		shardInfo[*s.ShardId] = true
 
 		// found new shard
-		if _, ok := w.shardStatus[*s.ShardId]; !ok {
+		if _, ok := c.shardStatus[*s.ShardId]; !ok {
 			log.Infof("Found new shard with id %s", *s.ShardId)
-			w.shardStatus[*s.ShardId] = &ShardStatus{
+			c.shardStatus[*s.ShardId] = &ShardStatus{
 				ID:                     *s.ShardId,
 				ParentShardId:          aws.StringValue(s.ParentShardId),
 				Mux:                    &sync.Mutex{},
@@ -364,7 +362,7 @@ func (w *Worker) getShardIDs(startShardID string, shardInfo map[string]bool) err
 	}
 
 	if *streamDesc.StreamDescription.HasMoreShards {
-		err := w.getShardIDs(lastShardID, shardInfo)
+		err := c.getShardIDs(lastShardID, shardInfo)
 		if err != nil {
 			log.Errorf("Error in getShardIDs: %s Error: %+v", lastShardID, err)
 			return err
@@ -375,23 +373,22 @@ func (w *Worker) getShardIDs(startShardID string, shardInfo map[string]bool) err
 }
 
 // syncShard to sync the cached shard info with actual shard info from Kinesis
-func (w *Worker) syncShard() error {
-	log := w.kclConfig.Logger
+func (c *Consumer) syncShard() error {
+	log := c.kclConfig.Logger
 	shardInfo := make(map[string]bool)
-	err := w.getShardIDs("", shardInfo)
-
+	err := c.getShardIDs("", shardInfo)
 	if err != nil {
 		return err
 	}
 
-	for _, shard := range w.shardStatus {
+	for _, shard := range c.shardStatus {
 		// The cached shard no longer existed, remove it.
 		if _, ok := shardInfo[shard.ID]; !ok {
 			// remove the shard from local status cache
-			delete(w.shardStatus, shard.ID)
+			delete(c.shardStatus, shard.ID)
 			// remove the shard entry in dynamoDB as well
 			// Note: syncShard runs periodically. we don't need to do anything in case of error here.
-			if err := w.checkpointer.RemoveLeaseInfo(shard.ID); err != nil {
+			if err := c.checkpointer.RemoveLeaseInfo(shard.ID); err != nil {
 				log.Errorf("Failed to remove shard lease info: %s Error: %+v", shard.ID, err)
 			}
 		}

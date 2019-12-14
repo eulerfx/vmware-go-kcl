@@ -63,17 +63,16 @@ type DynamoCheckpoint struct {
 	Retries       int
 }
 
-func NewDynamoCheckpoint(kclConfig *KinesisClientLibConfiguration) *DynamoCheckpoint {
+func NewDynamoCheckpoint(cfg *KinesisClientLibConfiguration) *DynamoCheckpoint {
 	checkpointer := &DynamoCheckpoint{
-		log:                     kclConfig.Logger,
-		TableName:               kclConfig.TableName,
-		leaseTableReadCapacity:  int64(kclConfig.InitialLeaseTableReadCapacity),
-		leaseTableWriteCapacity: int64(kclConfig.InitialLeaseTableWriteCapacity),
-		LeaseDuration:           kclConfig.FailoverTimeMillis,
-		kclConfig:               kclConfig,
+		log:                     cfg.Logger,
+		TableName:               cfg.TableName,
+		leaseTableReadCapacity:  int64(cfg.InitialLeaseTableReadCapacity),
+		leaseTableWriteCapacity: int64(cfg.InitialLeaseTableWriteCapacity),
+		LeaseDuration:           cfg.FailoverTimeMillis,
+		kclConfig:               cfg,
 		Retries:                 NumMaxRetries,
 	}
-
 	return checkpointer
 }
 
@@ -86,14 +85,12 @@ func (checkpointer *DynamoCheckpoint) WithDynamoDB(svc dynamodbiface.DynamoDBAPI
 // Init initialises the DynamoDB Checkpoint
 func (checkpointer *DynamoCheckpoint) Init() error {
 	checkpointer.log.Infof("Creating DynamoDB session")
-
 	s, err := session.NewSession(&aws.Config{
 		Region:      aws.String(checkpointer.kclConfig.RegionName),
 		Endpoint:    aws.String(checkpointer.kclConfig.DynamoDBEndpoint),
 		Credentials: checkpointer.kclConfig.DynamoDBCredentials,
 		Retryer:     client.DefaultRetryer{NumMaxRetries: checkpointer.Retries},
 	})
-
 	if err != nil {
 		// no need to move forward
 		checkpointer.log.Fatalf("Failed in getting DynamoDB session for creating Worker: %+v", err)
@@ -220,12 +217,12 @@ func (checkpointer *DynamoCheckpoint) CheckpointSequence(shard *ShardStatus) err
 
 // FetchCheckpoint retrieves the checkpoint for the given shard
 func (checkpointer *DynamoCheckpoint) FetchCheckpoint(shard *ShardStatus) error {
-	checkpoint, err := checkpointer.getItem(shard.ID)
+	row, err := checkpointer.getItem(shard.ID)
 	if err != nil {
 		return err
 	}
 
-	sequenceID, ok := checkpoint[CHECKPOINT_SEQUENCE_NUMBER_KEY]
+	sequenceID, ok := row[CHECKPOINT_SEQUENCE_NUMBER_KEY]
 	if !ok {
 		return ErrSequenceIDNotFound
 	}
@@ -234,7 +231,7 @@ func (checkpointer *DynamoCheckpoint) FetchCheckpoint(shard *ShardStatus) error 
 	defer shard.Mux.Unlock()
 	shard.Checkpoint = aws.StringValue(sequenceID.S)
 
-	if assignedTo, ok := checkpoint[LEASE_OWNER_KEY]; ok {
+	if assignedTo, ok := row[LEASE_OWNER_KEY]; ok {
 		shard.AssignedTo = aws.StringValue(assignedTo.S)
 	}
 	return nil
@@ -243,13 +240,11 @@ func (checkpointer *DynamoCheckpoint) FetchCheckpoint(shard *ShardStatus) error 
 // RemoveLeaseInfo to remove lease info for shard entry in dynamoDB because the shard no longer exists in Kinesis
 func (checkpointer *DynamoCheckpoint) RemoveLeaseInfo(shardID string) error {
 	err := checkpointer.removeItem(shardID)
-
 	if err != nil {
 		checkpointer.log.Errorf("Error in removing lease info for shard: %s, Error: %+v", shardID, err)
 	} else {
 		checkpointer.log.Infof("Lease info for shard: %s has been removed.", shardID)
 	}
-
 	return err
 }
 
