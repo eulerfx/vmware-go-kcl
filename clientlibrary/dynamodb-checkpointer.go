@@ -25,7 +25,7 @@
 // The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-package checkpoint
+package kcl
 
 import (
 	"errors"
@@ -39,7 +39,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 
 	"github.com/vmware/vmware-go-kcl/clientlibrary/config"
-	par "github.com/vmware/vmware-go-kcl/clientlibrary/partition"
 	"github.com/vmware/vmware-go-kcl/logger"
 )
 
@@ -111,7 +110,7 @@ func (checkpointer *DynamoCheckpoint) Init() error {
 }
 
 // GetLease attempts to gain a lock on the given shard
-func (checkpointer *DynamoCheckpoint) GetLease(shard *par.ShardStatus, newAssignTo string) error {
+func (checkpointer *DynamoCheckpoint) GetLease(shard *ShardStatus, newAssignTo string) error {
 	newLeaseTimeout := time.Now().Add(time.Duration(checkpointer.LeaseDuration) * time.Millisecond).UTC()
 	newLeaseTimeoutString := newLeaseTimeout.Format(time.RFC3339)
 	currentCheckpoint, err := checkpointer.getItem(shard.ID)
@@ -195,7 +194,7 @@ func (checkpointer *DynamoCheckpoint) GetLease(shard *par.ShardStatus, newAssign
 }
 
 // CheckpointSequence writes a checkpoint at the designated sequence ID
-func (checkpointer *DynamoCheckpoint) CheckpointSequence(shard *par.ShardStatus) error {
+func (checkpointer *DynamoCheckpoint) CheckpointSequence(shard *ShardStatus) error {
 	leaseTimeout := shard.LeaseTimeout.UTC().Format(time.RFC3339)
 	marshalledCheckpoint := map[string]*dynamodb.AttributeValue{
 		LEASE_KEY_KEY: {
@@ -220,7 +219,7 @@ func (checkpointer *DynamoCheckpoint) CheckpointSequence(shard *par.ShardStatus)
 }
 
 // FetchCheckpoint retrieves the checkpoint for the given shard
-func (checkpointer *DynamoCheckpoint) FetchCheckpoint(shard *par.ShardStatus) error {
+func (checkpointer *DynamoCheckpoint) FetchCheckpoint(shard *ShardStatus) error {
 	checkpoint, err := checkpointer.getItem(shard.ID)
 	if err != nil {
 		return err

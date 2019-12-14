@@ -25,7 +25,7 @@
 // The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-package prometheus
+package kcl
 
 import (
 	"net/http"
@@ -33,18 +33,18 @@ import (
 	prom "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/vmware/vmware-go-kcl/logger"
+	//"github.com/vmware/vmware-go-kcl/logger"
 )
 
-// MonitoringService publishes kcl metrics to Prometheus.
+// PromMonitoringService publishes kcl metrics to Prometheus.
 // It might be trick if the service onboarding with KCL already uses Prometheus.
-type MonitoringService struct {
+type PromMonitoringService struct {
 	listenAddress string
 	namespace     string
 	streamName    string
 	workerID      string
 	region        string
-	logger        logger.Logger
+	logger        Logger
 
 	processedRecords   *prom.CounterVec
 	processedBytes     *prom.CounterVec
@@ -56,15 +56,15 @@ type MonitoringService struct {
 }
 
 // NewMonitoringService returns a Monitoring service publishing metrics to Prometheus.
-func NewMonitoringService(listenAddress, region string, logger logger.Logger) *MonitoringService {
-	return &MonitoringService{
+func NewMonitoringService(listenAddress, region string, logger Logger) *PromMonitoringService {
+	return &PromMonitoringService{
 		listenAddress: listenAddress,
 		region:        region,
 		logger:        logger,
 	}
 }
 
-func (p *MonitoringService) Init(appName, streamName, workerID string) error {
+func (p *PromMonitoringService) Init(appName, streamName, workerID string) error {
 	p.namespace = appName
 	p.streamName = streamName
 	p.workerID = workerID
@@ -117,7 +117,7 @@ func (p *MonitoringService) Init(appName, streamName, workerID string) error {
 	return nil
 }
 
-func (p *MonitoringService) Start() error {
+func (p *PromMonitoringService) Start() error {
 	http.Handle("/metrics", promhttp.Handler())
 	go func() {
 		p.logger.Infof("Starting Prometheus listener on %s", p.listenAddress)
@@ -131,36 +131,36 @@ func (p *MonitoringService) Start() error {
 	return nil
 }
 
-func (p *MonitoringService) Shutdown() {}
+func (p *PromMonitoringService) Shutdown() {}
 
-func (p *MonitoringService) IncrRecordsProcessed(shard string, count int) {
+func (p *PromMonitoringService) IncrRecordsProcessed(shard string, count int) {
 	p.processedRecords.With(prom.Labels{"shard": shard, "kinesisStream": p.streamName}).Add(float64(count))
 }
 
-func (p *MonitoringService) IncrBytesProcessed(shard string, count int64) {
+func (p *PromMonitoringService) IncrBytesProcessed(shard string, count int64) {
 	p.processedBytes.With(prom.Labels{"shard": shard, "kinesisStream": p.streamName}).Add(float64(count))
 }
 
-func (p *MonitoringService) MillisBehindLatest(shard string, millSeconds float64) {
+func (p *PromMonitoringService) MillisBehindLatest(shard string, millSeconds float64) {
 	p.behindLatestMillis.With(prom.Labels{"shard": shard, "kinesisStream": p.streamName}).Set(millSeconds)
 }
 
-func (p *MonitoringService) LeaseGained(shard string) {
+func (p *PromMonitoringService) LeaseGained(shard string) {
 	p.leasesHeld.With(prom.Labels{"shard": shard, "kinesisStream": p.streamName, "workerID": p.workerID}).Inc()
 }
 
-func (p *MonitoringService) LeaseLost(shard string) {
+func (p *PromMonitoringService) LeaseLost(shard string) {
 	p.leasesHeld.With(prom.Labels{"shard": shard, "kinesisStream": p.streamName, "workerID": p.workerID}).Dec()
 }
 
-func (p *MonitoringService) LeaseRenewed(shard string) {
+func (p *PromMonitoringService) LeaseRenewed(shard string) {
 	p.leaseRenewals.With(prom.Labels{"shard": shard, "kinesisStream": p.streamName, "workerID": p.workerID}).Inc()
 }
 
-func (p *MonitoringService) RecordGetRecordsTime(shard string, time float64) {
+func (p *PromMonitoringService) RecordGetRecordsTime(shard string, time float64) {
 	p.getRecordsTime.With(prom.Labels{"shard": shard, "kinesisStream": p.streamName}).Observe(time)
 }
 
-func (p *MonitoringService) RecordProcessRecordsTime(shard string, time float64) {
+func (p *PromMonitoringService) RecordProcessRecordsTime(shard string, time float64) {
 	p.processRecordsTime.With(prom.Labels{"shard": shard, "kinesisStream": p.streamName}).Observe(time)
 }

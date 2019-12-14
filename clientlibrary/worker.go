@@ -25,7 +25,7 @@
 // The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-package worker
+package kcl
 
 import (
 	"errors"
@@ -38,11 +38,11 @@ import (
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 
-	chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
-	"github.com/vmware/vmware-go-kcl/clientlibrary/config"
-	kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
-	"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
-	par "github.com/vmware/vmware-go-kcl/clientlibrary/partition"
+	//chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
+	//"github.com/vmware/vmware-go-kcl/clientlibrary/config"
+	//kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
+	//"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
+	//par "github.com/vmware/vmware-go-kcl/clientl//brary/partition"
 )
 
 /**
@@ -55,11 +55,11 @@ type Worker struct {
 	regionName string
 	workerID   string
 
-	processorFactory kcl.IRecordProcessorFactory
-	kclConfig        *config.KinesisClientLibConfiguration
+	processorFactory IRecordProcessorFactory
+	kclConfig        *KinesisClientLibConfiguration
 	kc               kinesisiface.KinesisAPI
-	checkpointer     chk.Checkpointer
-	mService         metrics.MonitoringService
+	checkpointer     Checkpointer
+	mService         MonitoringService
 
 	stop      *chan struct{}
 	waitGroup *sync.WaitGroup
@@ -67,15 +67,15 @@ type Worker struct {
 
 	rng *rand.Rand
 
-	shardStatus map[string]*par.ShardStatus
+	shardStatus map[string]*ShardStatus
 }
 
 // NewWorker constructs a Worker instance for processing Kinesis stream data.
-func NewWorker(factory kcl.IRecordProcessorFactory, kclConfig *config.KinesisClientLibConfiguration) *Worker {
+func NewWorker(factory IRecordProcessorFactory, kclConfig *KinesisClientLibConfiguration) *Worker {
 	mService := kclConfig.MonitoringService
 	if mService == nil {
 		// Replaces nil with noop monitor service (not emitting any metrics).
-		mService = metrics.NoopMonitoringService{}
+		mService = NoopMonitoringService{}
 	}
 
 	// Create a pseudo-random number generator and seed it.
@@ -101,7 +101,7 @@ func (w *Worker) WithKinesis(svc kinesisiface.KinesisAPI) *Worker {
 
 // WithCheckpointer is used to provide a custom checkpointer service for non-dynamodb implementation
 // or unit testing.
-func (w *Worker) WithCheckpointer(checker chk.Checkpointer) *Worker {
+func (w *Worker) WithCheckpointer(checker Checkpointer) *Worker {
 	w.checkpointer = checker
 	return w
 }
@@ -190,7 +190,7 @@ func (w *Worker) initialize() error {
 	// Create default dynamodb based checkpointer implementation
 	if w.checkpointer == nil {
 		log.Infof("Creating DynamoDB based checkpointer")
-		w.checkpointer = chk.NewDynamoCheckpoint(w.kclConfig)
+		w.checkpointer = NewDynamoCheckpoint(w.kclConfig)
 	} else {
 		log.Infof("Use custom checkpointer implementation.")
 	}
@@ -206,7 +206,7 @@ func (w *Worker) initialize() error {
 		return err
 	}
 
-	w.shardStatus = make(map[string]*par.ShardStatus)
+	w.shardStatus = make(map[string]*ShardStatus)
 
 	stopChan := make(chan struct{})
 	w.stop = &stopChan
@@ -219,7 +219,7 @@ func (w *Worker) initialize() error {
 }
 
 // newShardConsumer to create a shard consumer instance
-func (w *Worker) newShardConsumer(shard *par.ShardStatus) *ShardConsumer {
+func (w *Worker) newShardConsumer(shard *ShardStatus) *ShardConsumer {
 	return &ShardConsumer{
 		streamName:      w.streamName,
 		shard:           shard,
@@ -257,7 +257,7 @@ func (w *Worker) eventLoop() {
 		// Count the number of leases hold by this worker excluding the processed shard
 		counter := 0
 		for _, shard := range w.shardStatus {
-			if shard.GetLeaseOwner() == w.workerID && shard.Checkpoint != chk.SHARD_END {
+			if shard.GetLeaseOwner() == w.workerID && shard.Checkpoint != SHARD_END {
 				counter++
 			}
 		}
@@ -273,7 +273,7 @@ func (w *Worker) eventLoop() {
 				err := w.checkpointer.FetchCheckpoint(shard)
 				if err != nil {
 					// checkpoint may not existed yet is not an error condition.
-					if err != chk.ErrSequenceIDNotFound {
+					if err != ErrSequenceIDNotFound {
 						log.Errorf(" Error: %+v", err)
 						// move on to next shard
 						continue
@@ -281,14 +281,14 @@ func (w *Worker) eventLoop() {
 				}
 
 				// The shard is closed and we have processed all records
-				if shard.Checkpoint == chk.SHARD_END {
+				if shard.Checkpoint == SHARD_END {
 					continue
 				}
 
 				err = w.checkpointer.GetLease(shard, w.workerID)
 				if err != nil {
 					// cannot get lease on the shard
-					if err.Error() != chk.ErrLeaseNotAquired {
+					if err.Error() != ErrLeaseNotAquired {
 						log.Errorf("Cannot get lease: %+v", err)
 					}
 					continue
@@ -353,7 +353,7 @@ func (w *Worker) getShardIDs(startShardID string, shardInfo map[string]bool) err
 		// found new shard
 		if _, ok := w.shardStatus[*s.ShardId]; !ok {
 			log.Infof("Found new shard with id %s", *s.ShardId)
-			w.shardStatus[*s.ShardId] = &par.ShardStatus{
+			w.shardStatus[*s.ShardId] = &ShardStatus{
 				ID:                     *s.ShardId,
 				ParentShardId:          aws.StringValue(s.ParentShardId),
 				Mux:                    &sync.Mutex{},

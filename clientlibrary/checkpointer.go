@@ -25,11 +25,10 @@
 // The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-package checkpoint
+package kcl
 
 import (
 	"errors"
-	par "github.com/vmware/vmware-go-kcl/clientlibrary/partition"
 )
 
 const (
@@ -52,13 +51,13 @@ type Checkpointer interface {
 	Init() error
 
 	// GetLease attempts to gain a lock on the given shard
-	GetLease(*par.ShardStatus, string) error
+	GetLease(*ShardStatus, string) error
 
 	// CheckpointSequence writes a checkpoint at the designated sequence ID
-	CheckpointSequence(*par.ShardStatus) error
+	CheckpointSequence(*ShardStatus) error
 
 	// FetchCheckpoint retrieves the checkpoint for the given shard
-	FetchCheckpoint(*par.ShardStatus) error
+	FetchCheckpoint(*ShardStatus) error
 
 	// RemoveLeaseInfo to remove lease info for shard entry because the shard no longer exists
 	RemoveLeaseInfo(string) error

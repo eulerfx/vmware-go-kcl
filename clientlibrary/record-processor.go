@@ -31,7 +31,7 @@
  * express or implied. See the License for the specific language governing
  * permissions and limitations under the License.
  */
-package interfaces
+package kcl
 
 type (
 	// IRecordProcessor is the interface for some callback functions invoked by KCL will

@@ -31,17 +31,17 @@
  * express or implied. See the License for the specific language governing
  * permissions and limitations under the License.
  */
-package config
+package kcl
 
 import (
 	"log"
 	"time"
 
-	"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
+	//"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
 
 	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/vmware/vmware-go-kcl/clientlibrary/utils"
-	"github.com/vmware/vmware-go-kcl/logger"
+	//"github.com/vmware/vmware-go-kcl/clientlibrary/utils"
+	//"github.com/vmware/vmware-go-kcl/logger"
 )
 
 // NewKinesisClientLibConfig creates a default KinesisClientLibConfiguration based on the required fields.
@@ -64,7 +64,7 @@ func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regio
 	checkIsValueNotEmpty("RegionName", regionName)
 
 	if empty(workerID) {
-		workerID = utils.MustNewUUID()
+		workerID = MustNewUUID()
 	}
 
 	// populate the KCL configuration with default values
@@ -94,7 +94,7 @@ func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regio
 		InitialLeaseTableReadCapacity:                    DEFAULT_INITIAL_LEASE_TABLE_READ_CAPACITY,
 		InitialLeaseTableWriteCapacity:                   DEFAULT_INITIAL_LEASE_TABLE_WRITE_CAPACITY,
 		SkipShardSyncAtWorkerInitializationIfLeasesExist: DEFAULT_SKIP_SHARD_SYNC_AT_STARTUP_IF_LEASES_EXIST,
-		Logger: logger.GetDefaultLogger(),
+		Logger: GetDefaultLogger(),
 	}
 }
 
@@ -197,7 +197,7 @@ func (c *KinesisClientLibConfiguration) WithTaskBackoffTimeMillis(taskBackoffTim
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithLogger(logger logger.Logger) *KinesisClientLibConfiguration {
+func (c *KinesisClientLibConfiguration) WithLogger(logger Logger) *KinesisClientLibConfiguration {
 	if logger == nil {
 		log.Panic("Logger cannot be null")
 	}
@@ -206,7 +206,7 @@ func (c *KinesisClientLibConfiguration) WithLogger(logger logger.Logger) *Kinesi
 }
 
 // WithMonitoringService sets the monitoring service to use to publish metrics.
-func (c *KinesisClientLibConfiguration) WithMonitoringService(mService metrics.MonitoringService) *KinesisClientLibConfiguration {
+func (c *KinesisClientLibConfiguration) WithMonitoringService(mService MonitoringService) *KinesisClientLibConfiguration {
 	// Nil case is handled downward (at worker creation) so no need to do it here.
 	// Plus the user might want to be explicit about passing a nil monitoring service here.
 	c.MonitoringService = mService

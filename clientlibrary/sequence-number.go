@@ -31,7 +31,7 @@
  * express or implied. See the License for the specific language governing
  * permissions and limitations under the License.
  */
-package interfaces
+package kcl
 
 // ExtendedSequenceNumber represents a two-part sequence number for records aggregated by the Kinesis Producer Library.
 //

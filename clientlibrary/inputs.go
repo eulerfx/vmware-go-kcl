@@ -31,7 +31,7 @@
  * express or implied. See the License for the specific language governing
  * permissions and limitations under the License.
  */
-package interfaces
+package kcl
 
 import (
 	"time"
@@ -103,4 +103,13 @@ var shutdownReasonMap = map[ShutdownReason]*string{
 
 func ShutdownReasonMessage(reason ShutdownReason) *string {
 	return shutdownReasonMap[reason]
+}
+
+
+func newInitialPositionAtTimestamp(timestamp *time.Time) *InitialPositionInStreamExtended {
+	return &InitialPositionInStreamExtended{Position: AT_TIMESTAMP, Timestamp: timestamp}
+}
+
+func newInitialPosition(position InitialPositionInStream) *InitialPositionInStreamExtended {
+	return &InitialPositionInStreamExtended{Position: position, Timestamp: nil}
 }

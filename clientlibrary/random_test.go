@@ -16,31 +16,35 @@
  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-// The implementation is derived from https://github.com/awslabs/amazon-kinesis-client
-/*
- * Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Amazon Software License (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- * http://aws.amazon.com/asl/
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
- */
-package config
+package kcl
 
 import (
+	"fmt"
+	"math/rand"
+	"testing"
 	"time"
 )
 
-func newInitialPositionAtTimestamp(timestamp *time.Time) *InitialPositionInStreamExtended {
-	return &InitialPositionInStreamExtended{Position: AT_TIMESTAMP, Timestamp: timestamp}
+func TestRandom(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		s1 := RandStringBytesMaskImpr(10)
+		s2 := RandStringBytesMaskImpr(10)
+		if s1 == s2 {
+			t.Fatalf("failed in generating random string. s1: %s, s2: %s", s1, s2)
+		}
+	}
 }
 
-func newInitialPosition(position InitialPositionInStream) *InitialPositionInStreamExtended {
-	return &InitialPositionInStreamExtended{Position: position, Timestamp: nil}
+func TestRandomNum(t *testing.T) {
+	rand.Seed(time.Now().UTC().UnixNano())
+
+	for i := 0; i < 10; i++ {
+		s1 := rand.Int63()
+		s2 := rand.Int63()
+		if s1 == s2 {
+			t.Fatalf("failed in generating random string. s1: %d, s2: %d", s1, s2)
+		}
+		fmt.Println(s1)
+		fmt.Println(s2)
+	}
 }

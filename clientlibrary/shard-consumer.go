@@ -25,7 +25,7 @@
 // The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-package worker
+package kcl
 
 import (
 	"math"
@@ -37,11 +37,11 @@ import (
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 
-	chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
-	"github.com/vmware/vmware-go-kcl/clientlibrary/config"
-	kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
-	"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
-	par "github.com/vmware/vmware-go-kcl/clientlibrary/partition"
+	//chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
+	//"github.com/vmware/vmware-go-kcl/clientlibrary/config"
+	//kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
+	//"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
+	//par "github.com/vmware/vmware-go-kcl/clientlibrary/partition"
 )
 
 const (
@@ -72,35 +72,35 @@ type ShardConsumerState int
 // Note: ShardConsumer only deal with one shard.
 type ShardConsumer struct {
 	streamName      string
-	shard           *par.ShardStatus
+	shard           *ShardStatus
 	kc              kinesisiface.KinesisAPI
-	checkpointer    chk.Checkpointer
-	recordProcessor kcl.IRecordProcessor
-	kclConfig       *config.KinesisClientLibConfiguration
+	checkpointer    Checkpointer
+	recordProcessor IRecordProcessor
+	kclConfig       *KinesisClientLibConfiguration
 	stop            *chan struct{}
 	consumerID      string
-	mService        metrics.MonitoringService
+	mService        MonitoringService
 	state           ShardConsumerState
 }
 
-func (sc *ShardConsumer) getShardIterator(shard *par.ShardStatus) (*string, error) {
+func (sc *ShardConsumer) getShardIterator(shard *ShardStatus) (*string, error) {
 	log := sc.kclConfig.Logger
 
 	// Get checkpoint of the shard from dynamoDB
 	err := sc.checkpointer.FetchCheckpoint(shard)
-	if err != nil && err != chk.ErrSequenceIDNotFound {
+	if err != nil && err != ErrSequenceIDNotFound {
 		return nil, err
 	}
 
 	// If there isn't any checkpoint for the shard, use the configuration value.
 	if shard.Checkpoint == "" {
 		initPos := sc.kclConfig.InitialPositionInStream
-		shardIteratorType := config.InitalPositionInStreamToShardIteratorType(initPos)
+		shardIteratorType := InitalPositionInStreamToShardIteratorType(initPos)
 		log.Debugf("No checkpoint recorded for shard: %v, starting with: %v", shard.ID,
 			aws.StringValue(shardIteratorType))
 
 		var shardIterArgs *kinesis.GetShardIteratorInput
-		if initPos == config.AT_TIMESTAMP {
+		if initPos == AT_TIMESTAMP {
 			shardIterArgs = &kinesis.GetShardIteratorInput{
 				ShardId:           &shard.ID,
 				ShardIteratorType: shardIteratorType,
@@ -138,7 +138,7 @@ func (sc *ShardConsumer) getShardIterator(shard *par.ShardStatus) (*string, erro
 
 // getRecords continously poll one shard for data record
 // Precondition: it currently has the lease on the shard.
-func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
+func (sc *ShardConsumer) getRecords(shard *ShardStatus) error {
 	defer sc.releaseLease(shard)
 
 	log := sc.kclConfig.Logger
@@ -146,7 +146,7 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 	// If the shard is child shard, need to wait until the parent finished.
 	if err := sc.waitOnParentShard(shard); err != nil {
 		// If parent shard has been deleted by Kinesis system already, just ignore the error.
-		if err != chk.ErrSequenceIDNotFound {
+		if err != ErrSequenceIDNotFound {
 			log.Errorf("Error in waiting for parent shard: %v to finish. Error: %+v", shard.ParentShardId, err)
 			return err
 		}
@@ -159,9 +159,9 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 	}
 
 	// Start processing events and notify record processor on shard and starting checkpoint
-	input := &kcl.InitializationInput{
+	input := &InitializationInput{
 		ShardId:                shard.ID,
-		ExtendedSequenceNumber: &kcl.ExtendedSequenceNumber{SequenceNumber: aws.String(shard.Checkpoint)},
+		ExtendedSequenceNumber: &ExtendedSequenceNumber{SequenceNumber: aws.String(shard.Checkpoint)},
 	}
 	sc.recordProcessor.Initialize(input)
 
@@ -216,7 +216,7 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 		retriedErrors = 0
 
 		// IRecordProcessorCheckpointer
-		input := &kcl.ProcessRecordsInput{
+		input := &ProcessRecordsInput{
 			Records:            getResp.Records,
 			MillisBehindLatest: aws.Int64Value(getResp.MillisBehindLatest),
 			Checkpointer:       recordCheckpointer,
@@ -255,7 +255,7 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 		// The shard has been closed, so no new records can be read from it
 		if getResp.NextShardIterator == nil {
 			log.Infof("Shard %s closed", shard.ID)
-			shutdownInput := &kcl.ShutdownInput{ShutdownReason: kcl.TERMINATE, Checkpointer: recordCheckpointer}
+			shutdownInput := &ShutdownInput{ShutdownReason: TERMINATE, Checkpointer: recordCheckpointer}
 			sc.recordProcessor.Shutdown(shutdownInput)
 			return nil
 		}
@@ -263,7 +263,7 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 
 		select {
 		case <-*sc.stop:
-			shutdownInput := &kcl.ShutdownInput{ShutdownReason: kcl.REQUESTED, Checkpointer: recordCheckpointer}
+			shutdownInput := &ShutdownInput{ShutdownReason: REQUESTED, Checkpointer: recordCheckpointer}
 			sc.recordProcessor.Shutdown(shutdownInput)
 			return nil
 		default:
@@ -272,12 +272,12 @@ func (sc *ShardConsumer) getRecords(shard *par.ShardStatus) error {
 }
 
 // Need to wait until the parent shard finished
-func (sc *ShardConsumer) waitOnParentShard(shard *par.ShardStatus) error {
+func (sc *ShardConsumer) waitOnParentShard(shard *ShardStatus) error {
 	if len(shard.ParentShardId) == 0 {
 		return nil
 	}
 
-	pshard := &par.ShardStatus{
+	pshard := &ShardStatus{
 		ID:  shard.ParentShardId,
 		Mux: &sync.Mutex{},
 	}
@@ -297,7 +297,7 @@ func (sc *ShardConsumer) waitOnParentShard(shard *par.ShardStatus) error {
 }
 
 // Cleanup the internal lease cache
-func (sc *ShardConsumer) releaseLease(shard *par.ShardStatus) {
+func (sc *ShardConsumer) releaseLease(shard *ShardStatus) {
 	log := sc.kclConfig.Logger
 	log.Infof("Release lease for shard %s", shard.ID)
 	shard.SetLeaseOwner("")

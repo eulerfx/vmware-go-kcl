@@ -16,17 +16,29 @@
  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-package utils
+package kcl
 
 import (
-	guuid "github.com/google/uuid"
+	"github.com/vmware/vmware-go-kcl/logger"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-// MustNewUUID generates a new UUID and panics if failed
-func MustNewUUID() string {
-	id, err := guuid.NewUUID()
-	if err != nil {
-		panic(err)
-	}
-	return id.String()
+func TestConfig(t *testing.T) {
+	kclConfig := NewKinesisClientLibConfig("appName", "StreamName", "us-west-2", "workerId").
+		WithFailoverTimeMillis(500).
+		WithMaxRecords(100).
+		WithInitialPositionInStream(TRIM_HORIZON).
+		WithIdleTimeBetweenReadsInMillis(20).
+		WithCallProcessRecordsEvenForEmptyRecordList(true).
+		WithTaskBackoffTimeMillis(10)
+
+	assert.Equal(t, "appName", kclConfig.ApplicationName)
+	assert.Equal(t, 500, kclConfig.FailoverTimeMillis)
+	assert.Equal(t, 10, kclConfig.TaskBackoffTimeMillis)
+
+	contextLogger := kclConfig.Logger.WithFields(logger.Fields{"key1": "value1"})
+	contextLogger.Debugf("Starting with default logger")
+	contextLogger.Infof("Default logger is awesome")
 }

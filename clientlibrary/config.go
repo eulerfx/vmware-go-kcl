@@ -31,7 +31,7 @@
  * express or implied. See the License for the specific language governing
  * permissions and limitations under the License.
  */
-package config
+package kcl
 
 import (
 	"log"
@@ -41,7 +41,6 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	creds "github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
 	"github.com/vmware/vmware-go-kcl/logger"
 )
 
@@ -253,7 +252,7 @@ type (
 		Logger logger.Logger
 
 		// MonitoringService publishes per worker-scoped metrics.
-		MonitoringService metrics.MonitoringService
+		MonitoringService MonitoringService
 	}
 )
 

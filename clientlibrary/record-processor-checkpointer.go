@@ -16,22 +16,15 @@
  * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-// The implementation is derived from https://github.com/awslabs/amazon-kinesis-client
-/*
- * Copyright 2014-2015 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- *
- * Licensed under the Amazon Software License (the "License").
- * You may not use this file except in compliance with the License.
- * A copy of the License is located at
- *
- * http://aws.amazon.com/asl/
- *
- * or in the "license" file accompanying this file. This file is distributed
- * on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing
- * permissions and limitations under the License.
- */
-package interfaces
+package kcl
+
+import (
+	"github.com/aws/aws-sdk-go/aws"
+
+	//chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
+	//kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
+	//par "github.com/vmware/vmware-go-kcl/clientlibrary/partition"
+)
 
 type (
 	IPreparedCheckpointer interface {
@@ -109,3 +102,60 @@ type (
 		PrepareCheckpoint(sequenceNumber *string) (IPreparedCheckpointer, error)
 	}
 )
+
+
+type (
+
+	/* Objects of this class are prepared to checkpoint at a specific sequence number. They use an
+	 * IRecordProcessorCheckpointer to do the actual checkpointing, so their checkpoint is subject to the same 'didn't go
+	 * backwards' validation as a normal checkpoint.
+	 */
+	PreparedCheckpointer struct {
+		pendingCheckpointSequenceNumber *ExtendedSequenceNumber
+		checkpointer                    IRecordProcessorCheckpointer
+	}
+
+	/**
+	 * This class is used to enable RecordProcessors to checkpoint their progress.
+	 * The Amazon Kinesis Client Library will instantiate an object and provide a reference to the application
+	 * RecordProcessor instance. Amazon Kinesis Client Library will create one instance per shard assignment.
+	 */
+	RecordProcessorCheckpointer struct {
+		shard      *ShardStatus
+		checkpoint Checkpointer
+	}
+)
+
+func NewRecordProcessorCheckpoint(shard *ShardStatus, checkpoint Checkpointer) IRecordProcessorCheckpointer {
+	return &RecordProcessorCheckpointer{
+		shard:      shard,
+		checkpoint: checkpoint,
+	}
+}
+
+func (pc *PreparedCheckpointer) GetPendingCheckpoint() *ExtendedSequenceNumber {
+	return pc.pendingCheckpointSequenceNumber
+}
+
+func (pc *PreparedCheckpointer) Checkpoint() error {
+	return pc.checkpointer.Checkpoint(pc.pendingCheckpointSequenceNumber.SequenceNumber)
+}
+
+func (rc *RecordProcessorCheckpointer) Checkpoint(sequenceNumber *string) error {
+	rc.shard.Mux.Lock()
+
+	// checkpoint the last sequence of a closed shard
+	if sequenceNumber == nil {
+		rc.shard.Checkpoint = SHARD_END
+	} else {
+		rc.shard.Checkpoint = aws.StringValue(sequenceNumber)
+	}
+
+	rc.shard.Mux.Unlock()
+	return rc.checkpoint.CheckpointSequence(rc.shard)
+}
+
+func (rc *RecordProcessorCheckpointer) PrepareCheckpoint(sequenceNumber *string) (IPreparedCheckpointer, error) {
+	return &PreparedCheckpointer{}, nil
+
+}

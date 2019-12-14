@@ -25,7 +25,7 @@
 // The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-package checkpoint
+package kcl
 
 import (
 	"errors"
@@ -38,9 +38,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
-
-	cfg "github.com/vmware/vmware-go-kcl/clientlibrary/config"
-	par "github.com/vmware/vmware-go-kcl/clientlibrary/partition"
 )
 
 func TestDoesTableExist(t *testing.T) {
@@ -62,8 +59,8 @@ func TestDoesTableExist(t *testing.T) {
 
 func TestGetLeaseNotAquired(t *testing.T) {
 	svc := &mockDynamoDB{tableExist: true, item: map[string]*dynamodb.AttributeValue{}}
-	kclConfig := cfg.NewKinesisClientLibConfig("appName", "test", "us-west-2", "abc").
-		WithInitialPositionInStream(cfg.LATEST).
+	kclConfig := NewKinesisClientLibConfig("appName", "test", "us-west-2", "abc").
+		WithInitialPositionInStream(LATEST).
 		WithMaxRecords(10).
 		WithMaxLeasesForWorker(1).
 		WithShardSyncIntervalMillis(5000).
@@ -71,7 +68,7 @@ func TestGetLeaseNotAquired(t *testing.T) {
 
 	checkpoint := NewDynamoCheckpoint(kclConfig).WithDynamoDB(svc)
 	checkpoint.Init()
-	err := checkpoint.GetLease(&par.ShardStatus{
+	err := checkpoint.GetLease(&ShardStatus{
 		ID:         "0001",
 		Checkpoint: "",
 		Mux:        &sync.Mutex{},
@@ -80,7 +77,7 @@ func TestGetLeaseNotAquired(t *testing.T) {
 		t.Errorf("Error getting lease %s", err)
 	}
 
-	err = checkpoint.GetLease(&par.ShardStatus{
+	err = checkpoint.GetLease(&ShardStatus{
 		ID:         "0001",
 		Checkpoint: "",
 		Mux:        &sync.Mutex{},
@@ -92,8 +89,8 @@ func TestGetLeaseNotAquired(t *testing.T) {
 
 func TestGetLeaseAquired(t *testing.T) {
 	svc := &mockDynamoDB{tableExist: true, item: map[string]*dynamodb.AttributeValue{}}
-	kclConfig := cfg.NewKinesisClientLibConfig("appName", "test", "us-west-2", "abc").
-		WithInitialPositionInStream(cfg.LATEST).
+	kclConfig := NewKinesisClientLibConfig("appName", "test", "us-west-2", "abc").
+		WithInitialPositionInStream(LATEST).
 		WithMaxRecords(10).
 		WithMaxLeasesForWorker(1).
 		WithShardSyncIntervalMillis(5000).
@@ -120,7 +117,7 @@ func TestGetLeaseAquired(t *testing.T) {
 		Item:      marshalledCheckpoint,
 	}
 	checkpoint.svc.PutItem(input)
-	shard := &par.ShardStatus{
+	shard := &ShardStatus{
 		ID:         "0001",
 		Checkpoint: "deadbeef",
 		Mux:        &sync.Mutex{},
@@ -142,7 +139,7 @@ func TestGetLeaseAquired(t *testing.T) {
 	err = checkpoint.RemoveLeaseOwner(shard.ID)
 	assert.Nil(t, err)
 
-	status := &par.ShardStatus{
+	status := &ShardStatus{
 		ID:  shard.ID,
 		Mux: &sync.Mutex{},
 	}
