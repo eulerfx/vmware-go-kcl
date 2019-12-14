@@ -32,8 +32,7 @@ import (
 
 	prom "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
-	//"github.com/vmware/vmware-go-kcl/logger"
+	"github.com/vmware/vmware-go-kcl/logger"
 )
 
 // PromMonitoringService publishes kcl metrics to Prometheus.
@@ -44,7 +43,7 @@ type PromMonitoringService struct {
 	streamName    string
 	workerID      string
 	region        string
-	logger        Logger
+	logger        logger.Logger
 
 	processedRecords   *prom.CounterVec
 	processedBytes     *prom.CounterVec
@@ -56,7 +55,7 @@ type PromMonitoringService struct {
 }
 
 // NewMonitoringService returns a Monitoring service publishing metrics to Prometheus.
-func NewMonitoringService(listenAddress, region string, logger Logger) *PromMonitoringService {
+func NewMonitoringService(listenAddress, region string, logger logger.Logger) *PromMonitoringService {
 	return &PromMonitoringService{
 		listenAddress: listenAddress,
 		region:        region,

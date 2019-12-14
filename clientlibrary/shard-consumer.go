@@ -36,7 +36,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-
 	//chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
 	//"github.com/vmware/vmware-go-kcl/clientlibrary/config"
 	//kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
@@ -65,6 +64,41 @@ const (
 	// But it's not a constant?
 	ErrCodeKMSThrottlingException = "KMSThrottlingException"
 )
+
+// ExtendedSequenceNumber represents a two-part sequence number for records aggregated by the Kinesis Producer Library.
+//
+// The KPL combines multiple user records into a single Kinesis record. Each user record therefore has an integer
+// sub-sequence number, in addition to the regular sequence number of the Kinesis record. The sub-sequence number
+// is used to checkpoint within an aggregated record.
+type ExtendedSequenceNumber struct {
+	SequenceNumber    *string
+	SubSequenceNumber int64
+}
+
+type ShardStatus struct {
+	ID            string
+	ParentShardId string
+	Checkpoint    string
+	AssignedTo    string
+	Mux           *sync.Mutex
+	LeaseTimeout  time.Time
+	// Shard Range
+	StartingSequenceNumber string
+	// child shard doesn't have end sequence number
+	EndingSequenceNumber string
+}
+
+func (ss *ShardStatus) GetLeaseOwner() string {
+	ss.Mux.Lock()
+	defer ss.Mux.Unlock()
+	return ss.AssignedTo
+}
+
+func (ss *ShardStatus) SetLeaseOwner(owner string) {
+	ss.Mux.Lock()
+	defer ss.Mux.Unlock()
+	ss.AssignedTo = owner
+}
 
 type ShardConsumerState int
 
@@ -173,7 +207,7 @@ func (sc *ShardConsumer) getRecords(shard *ShardStatus) error {
 			log.Debugf("Refreshing lease on shard: %s for worker: %s", shard.ID, sc.consumerID)
 			err = sc.checkpointer.GetLease(shard, sc.consumerID)
 			if err != nil {
-				if err.Error() == chk.ErrLeaseNotAquired {
+				if err.Error() == ErrLeaseNotAquired {
 					log.Warnf("Failed in acquiring lease on shard: %s for worker: %s", shard.ID, sc.consumerID)
 					return nil
 				}
@@ -288,7 +322,7 @@ func (sc *ShardConsumer) waitOnParentShard(shard *ShardStatus) error {
 		}
 
 		// Parent shard is finished.
-		if pshard.Checkpoint == chk.SHARD_END {
+		if pshard.Checkpoint == SHARD_END {
 			return nil
 		}
 

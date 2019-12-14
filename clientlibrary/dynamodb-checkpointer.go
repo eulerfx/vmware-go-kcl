@@ -38,7 +38,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 
-	"github.com/vmware/vmware-go-kcl/clientlibrary/config"
+	//"github.com/vmware/vmware-go-kcl/clientlibrary/config"
 	"github.com/vmware/vmware-go-kcl/logger"
 )
 
@@ -59,11 +59,11 @@ type DynamoCheckpoint struct {
 
 	LeaseDuration int
 	svc           dynamodbiface.DynamoDBAPI
-	kclConfig     *config.KinesisClientLibConfiguration
+	kclConfig     *KinesisClientLibConfiguration
 	Retries       int
 }
 
-func NewDynamoCheckpoint(kclConfig *config.KinesisClientLibConfiguration) *DynamoCheckpoint {
+func NewDynamoCheckpoint(kclConfig *KinesisClientLibConfiguration) *DynamoCheckpoint {
 	checkpointer := &DynamoCheckpoint{
 		log:                     kclConfig.Logger,
 		TableName:               kclConfig.TableName,

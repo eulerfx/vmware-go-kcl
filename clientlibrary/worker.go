@@ -37,7 +37,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-
 	//chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
 	//"github.com/vmware/vmware-go-kcl/clientlibrary/config"
 	//kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"

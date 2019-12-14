@@ -41,7 +41,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	//"github.com/vmware/vmware-go-kcl/clientlibrary/utils"
-	//"github.com/vmware/vmware-go-kcl/logger"
+	"github.com/vmware/vmware-go-kcl/logger"
 )
 
 // NewKinesisClientLibConfig creates a default KinesisClientLibConfiguration based on the required fields.
@@ -94,7 +94,7 @@ func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regio
 		InitialLeaseTableReadCapacity:                    DEFAULT_INITIAL_LEASE_TABLE_READ_CAPACITY,
 		InitialLeaseTableWriteCapacity:                   DEFAULT_INITIAL_LEASE_TABLE_WRITE_CAPACITY,
 		SkipShardSyncAtWorkerInitializationIfLeasesExist: DEFAULT_SKIP_SHARD_SYNC_AT_STARTUP_IF_LEASES_EXIST,
-		Logger: GetDefaultLogger(),
+		Logger: logger.GetDefaultLogger(),
 	}
 }
 
@@ -197,7 +197,7 @@ func (c *KinesisClientLibConfiguration) WithTaskBackoffTimeMillis(taskBackoffTim
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithLogger(logger Logger) *KinesisClientLibConfiguration {
+func (c *KinesisClientLibConfiguration) WithLogger(logger logger.Logger) *KinesisClientLibConfiguration {
 	if logger == nil {
 		log.Panic("Logger cannot be null")
 	}
