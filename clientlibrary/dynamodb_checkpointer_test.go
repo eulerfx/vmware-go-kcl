@@ -28,6 +28,7 @@
 package kcl
 
 import (
+	"context"
 	"errors"
 	"github.com/stretchr/testify/assert"
 	"sync"
@@ -42,7 +43,7 @@ import (
 
 func TestDoesTableExist(t *testing.T) {
 	svc := &mockDynamoDB{tableExist: true, item: map[string]*dynamodb.AttributeValue{}}
-	checkpoint := &DynamoCheckpoint{
+	checkpoint := &DynamoDbCheckpointer{
 		TableName: "TableName",
 		svc:       svc,
 	}
@@ -66,21 +67,22 @@ func TestGetLeaseNotAquired(t *testing.T) {
 		WithShardSyncIntervalMillis(5000).
 		WithFailoverTimeMillis(300000)
 
-	checkpoint := NewDynamoCheckpoint(kclConfig).WithDynamoDB(svc)
+	checkpoint := NewDynamoDbCheckpointer(kclConfig).WithDynamoDB(svc)
 	checkpoint.Init()
-	err := checkpoint.GetLease(&ShardStatus{
+	ctx := context.Background()
+	err := checkpoint.GetLease(ctx, &ShardStatus{
 		ID:         "0001",
 		Checkpoint: "",
-		Mux:        &sync.Mutex{},
+		mux:        &sync.Mutex{},
 	}, "abcd-efgh")
 	if err != nil {
 		t.Errorf("Error getting lease %s", err)
 	}
 
-	err = checkpoint.GetLease(&ShardStatus{
+	err = checkpoint.GetLease(ctx, &ShardStatus{
 		ID:         "0001",
 		Checkpoint: "",
-		Mux:        &sync.Mutex{},
+		mux:        &sync.Mutex{},
 	}, "ijkl-mnop")
 	if err == nil || err.Error() != ErrLeaseNotAquired {
 		t.Errorf("Got a lease when it was already held by abcd-efgh: %s", err)
@@ -96,7 +98,7 @@ func TestGetLeaseAquired(t *testing.T) {
 		WithShardSyncIntervalMillis(5000).
 		WithFailoverTimeMillis(300000)
 
-	checkpoint := NewDynamoCheckpoint(kclConfig).WithDynamoDB(svc)
+	checkpoint := NewDynamoDbCheckpointer(kclConfig).WithDynamoDB(svc)
 	checkpoint.Init()
 	marshalledCheckpoint := map[string]*dynamodb.AttributeValue{
 		"ShardID": {
@@ -120,9 +122,9 @@ func TestGetLeaseAquired(t *testing.T) {
 	shard := &ShardStatus{
 		ID:         "0001",
 		Checkpoint: "deadbeef",
-		Mux:        &sync.Mutex{},
+		mux:        &sync.Mutex{},
 	}
-	err := checkpoint.GetLease(shard, "ijkl-mnop")
+	err := checkpoint.GetLease(context.Background(), shard, "ijkl-mnop")
 
 	if err != nil {
 		t.Errorf("Lease not aquired after timeout %s", err)
@@ -141,7 +143,7 @@ func TestGetLeaseAquired(t *testing.T) {
 
 	status := &ShardStatus{
 		ID:  shard.ID,
-		Mux: &sync.Mutex{},
+		mux: &sync.Mutex{},
 	}
 	checkpoint.FetchCheckpoint(status)
 

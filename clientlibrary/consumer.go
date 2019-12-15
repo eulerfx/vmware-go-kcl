@@ -28,6 +28,7 @@
 package kcl
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"sync"
@@ -54,24 +55,26 @@ type Consumer struct {
 	regionName string
 	workerID   string
 
-	processorFactory func() RecordProcessor
-	kclConfig        *KinesisClientLibConfiguration
-	kc               kinesisiface.KinesisAPI
-	checkpointer     Checkpointer
-	mService         MonitoringService
+	makeProcessor func() RecordProcessor
+	cfg           *KinesisClientLibConfiguration
+	kc            kinesisiface.KinesisAPI
+	checkpointer  Checkpointer
+	metrics       MonitoringService
 
-	stop      *chan struct{}
-	waitGroup *sync.WaitGroup
-	done      bool
+	stop                   *chan struct{}
+	shardConsumerWaitGroup *sync.WaitGroup // for shard consumers
+	done                   bool
 
+	// for jitter
 	rng *rand.Rand
 
+	// keyed by Shard.ID.
 	shardStatus map[string]*ShardStatus
 }
 
 // NewConsumer constructs a Worker instance for processing Kinesis stream data.
-func NewConsumer(factory func() RecordProcessor, kclConfig *KinesisClientLibConfiguration) *Consumer {
-	mService := kclConfig.MonitoringService
+func NewConsumer(factory func() RecordProcessor, cfg *KinesisClientLibConfiguration) *Consumer {
+	mService := cfg.MonitoringService
 	if mService == nil {
 		// Replaces nil with noop monitor service (not emitting any metrics).
 		mService = NoopMonitoringService{}
@@ -81,14 +84,14 @@ func NewConsumer(factory func() RecordProcessor, kclConfig *KinesisClientLibConf
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	return &Consumer{
-		streamName:       kclConfig.StreamName,
-		regionName:       kclConfig.RegionName,
-		workerID:         kclConfig.WorkerID,
-		processorFactory: factory,
-		kclConfig:        kclConfig,
-		mService:         mService,
-		done:             false,
-		rng:              rng,
+		streamName:    cfg.StreamName,
+		regionName:    cfg.RegionName,
+		workerID:      cfg.WorkerID,
+		makeProcessor: factory,
+		cfg:           cfg,
+		metrics:       mService,
+		done:          false,
+		rng:           rng,
 	}
 }
 
@@ -105,9 +108,9 @@ func (c *Consumer) WithCheckpointer(checker Checkpointer) *Consumer {
 	return c
 }
 
-// Run starts consuming data from the stream, and pass it to the application record processors.
+// Start starts consuming data from the stream, and pass it to the application record processors.
 func (c *Consumer) Start() error {
-	log := c.kclConfig.Logger
+	log := c.cfg.Logger
 	if err := c.initialize(); err != nil {
 		log.Errorf("Failed to initialize Worker: %+v", err)
 		return err
@@ -115,15 +118,15 @@ func (c *Consumer) Start() error {
 
 	// Start monitoring service
 	log.Infof("Starting monitoring service.")
-	if err := c.mService.Start(); err != nil {
+	if err := c.metrics.Start(); err != nil {
 		log.Errorf("Failed to start monitoring service: %+v", err)
 		return err
 	}
 
 	log.Infof("Starting worker event loop.")
-	c.waitGroup.Add(1)
+	c.shardConsumerWaitGroup.Add(1)
 	go func() {
-		defer c.waitGroup.Done()
+		defer c.shardConsumerWaitGroup.Done()
 		// entering event loop
 		c.eventLoop()
 	}()
@@ -132,7 +135,7 @@ func (c *Consumer) Start() error {
 
 // Shutdown signals worker to shutdown. Worker will try initiating shutdown of all record processors.
 func (c *Consumer) Shutdown() {
-	log := c.kclConfig.Logger
+	log := c.cfg.Logger
 	log.Infof("Worker shutdown in requested.")
 
 	if c.done {
@@ -141,15 +144,15 @@ func (c *Consumer) Shutdown() {
 
 	close(*c.stop)
 	c.done = true
-	c.waitGroup.Wait()
+	c.shardConsumerWaitGroup.Wait() // shard consumers
 
-	c.mService.Shutdown()
+	c.metrics.Shutdown()
 	log.Infof("Worker loop is complete. Exiting from worker.")
 }
 
 // Publish to write some data into stream. This function is mainly used for testing purpose.
 func (c *Consumer) Publish(streamName, partitionKey string, data []byte) error {
-	log := c.kclConfig.Logger
+	log := c.cfg.Logger
 	_, err := c.kc.PutRecord(&kinesis.PutRecordInput{
 		Data:         data,
 		StreamName:   aws.String(streamName),
@@ -163,7 +166,7 @@ func (c *Consumer) Publish(streamName, partitionKey string, data []byte) error {
 
 // initialize
 func (c *Consumer) initialize() error {
-	log := c.kclConfig.Logger
+	log := c.cfg.Logger
 	log.Infof("Worker initialization in progress...")
 
 	// Create default Kinesis session
@@ -173,8 +176,8 @@ func (c *Consumer) initialize() error {
 
 		s, err := session.NewSession(&aws.Config{
 			Region:      aws.String(c.regionName),
-			Endpoint:    &c.kclConfig.KinesisEndpoint,
-			Credentials: c.kclConfig.KinesisCredentials,
+			Endpoint:    &c.cfg.KinesisEndpoint,
+			Credentials: c.cfg.KinesisCredentials,
 		})
 
 		if err != nil {
@@ -189,12 +192,12 @@ func (c *Consumer) initialize() error {
 	// Create default dynamodb based checkpointer implementation
 	if c.checkpointer == nil {
 		log.Infof("Creating DynamoDB based checkpointer")
-		c.checkpointer = NewDynamoCheckpoint(c.kclConfig)
+		c.checkpointer = NewDynamoDbCheckpointer(c.cfg)
 	} else {
 		log.Infof("Use custom checkpointer implementation.")
 	}
 
-	err := c.mService.Init(c.kclConfig.ApplicationName, c.streamName, c.workerID)
+	err := c.metrics.Init(c.cfg.ApplicationName, c.streamName, c.workerID)
 	if err != nil {
 		log.Errorf("Failed to start monitoring service: %+v", err)
 	}
@@ -210,7 +213,7 @@ func (c *Consumer) initialize() error {
 	stopChan := make(chan struct{})
 	c.stop = &stopChan
 
-	c.waitGroup = &sync.WaitGroup{}
+	c.shardConsumerWaitGroup = &sync.WaitGroup{}
 
 	log.Infof("Initialization complete.")
 
@@ -224,23 +227,24 @@ func (c *Consumer) newShardConsumer(shard *ShardStatus) *ShardConsumer {
 		shard:           shard,
 		kc:              c.kc,
 		checkpointer:    c.checkpointer,
-		recordProcessor: c.processorFactory(),
-		kclConfig:       c.kclConfig,
+		recordProcessor: c.makeProcessor(),
+		cfg:             c.cfg,
 		consumerID:      c.workerID,
 		stop:            c.stop,
-		mService:        c.mService,
+		metrics:         c.metrics,
 		state:           WAITING_ON_PARENT_SHARDS,
 	}
 }
 
 // eventLoop
 func (c *Consumer) eventLoop() {
-	log := c.kclConfig.Logger
+	log := c.cfg.Logger
 	// Add [-50%, +50%] random jitter to ShardSyncIntervalMillis. When multiple workers
 	// starts at the same time, this decreases the probability of them calling
 	// kinesis.DescribeStream at the same time, and hit the hard-limit on aws API calls.
 	// On average the period remains the same so that doesn't affect behavior.
-	shardSyncSleep := c.kclConfig.ShardSyncIntervalMillis/2 + c.rng.Intn(int(c.kclConfig.ShardSyncIntervalMillis))
+	shardSyncSleep := c.cfg.ShardSyncIntervalMillis/2 + c.rng.Intn(int(c.cfg.ShardSyncIntervalMillis))
+	// each tick: { sync shard status, for each shard: { fetch checkpoint, acquire lease, and starts a shard consumer } }
 	for {
 		err := c.syncShard()
 		if err != nil {
@@ -260,54 +264,65 @@ func (c *Consumer) eventLoop() {
 		}
 
 		// max number of lease has not been reached yet
-		if counter < c.kclConfig.MaxLeasesForWorker {
-			for _, shard := range c.shardStatus {
-				// already owner of the shard
-				if shard.GetLeaseOwner() == c.workerID {
-					continue
-				}
-
-				err := c.checkpointer.FetchCheckpoint(shard)
-				if err != nil {
-					// checkpoint may not existed yet is not an error condition.
-					if err != ErrSequenceIDNotFound {
-						log.Errorf(" Error: %+v", err)
-						// move on to next shard
-						continue
-					}
-				}
-
-				// The shard is closed and we have processed all records
-				if shard.Checkpoint == SHARD_END {
-					continue
-				}
-
-				err = c.checkpointer.GetLease(shard, c.workerID)
-				if err != nil {
-					// cannot get lease on the shard
-					if err.Error() != ErrLeaseNotAquired {
-						log.Errorf("Cannot get lease: %+v", err)
-					}
-					continue
-				}
-
-				// log metrics on got lease
-				c.mService.LeaseGained(shard.ID)
-
-				log.Infof("Start Shard Consumer for shard: %v", shard.ID)
-				sc := c.newShardConsumer(shard)
-				c.waitGroup.Add(1)
-				go func() {
-					defer c.waitGroup.Done()
-					if err := sc.getRecords(shard); err != nil {
-						log.Errorf("Error in getRecords: %+v", err)
-					}
-				}()
-				// exit from for loop and not to grab more shard for now.
-				break
-			}
+		if counter >= c.cfg.MaxLeasesForWorker {
+			// yes, its a goto, yes it can be refactored
+			goto WAIT_OR_STOP
 		}
 
+		for _, shard := range c.shardStatus {
+			// already owner of the shard
+			if shard.GetLeaseOwner() == c.workerID {
+				continue
+			}
+
+			err := c.checkpointer.FetchCheckpoint(shard)
+			if err != nil {
+				// checkpoint may not existed yet is not an error condition.
+				if err != ErrSequenceIDNotFound {
+					log.Errorf(" Error: %+v", err)
+					// move on to next shard
+					continue
+				}
+			}
+
+			// The shard is closed and we have processed all records
+			if shard.Checkpoint == SHARD_END {
+				continue
+			}
+
+			// per consumer context.
+			ctx := context.Background()
+
+			err = c.checkpointer.GetLease(ctx, shard, c.workerID)
+			if err != nil {
+				// cannot get lease on the shard
+				if err.Error() != ErrLeaseNotAquired {
+					log.Errorf("Cannot get lease: %+v", err)
+				}
+				continue
+			}
+
+			// log metrics on got lease
+			c.metrics.LeaseGained(shard.ID)
+
+			log.Infof("Start Shard Consumer for shard: %v", shard.ID)
+
+			shardConsumer := c.newShardConsumer(shard)
+			c.shardConsumerWaitGroup.Add(1)
+			ctx, cancel := context.WithCancel(ctx)
+			go func() {
+				//ctx, cancel := context.WithCancel(ctx)
+				defer c.shardConsumerWaitGroup.Done()
+				defer cancel()
+				if err := shardConsumer.run(ctx); err != nil {
+					log.Errorf("Error in getRecords: %+v", err)
+				}
+			}()
+			// exit from for loop and not to grab more shard for now.
+			break
+		}
+
+	WAIT_OR_STOP:
 		select {
 		case <-*c.stop:
 			log.Infof("Shutting down...")
@@ -321,7 +336,7 @@ func (c *Consumer) eventLoop() {
 // List all ACTIVE shard and store them into shardStatus table
 // If shard has been removed, need to exclude it from cached shard status.
 func (c *Consumer) getShardIDs(startShardID string, shardInfo map[string]bool) error {
-	log := c.kclConfig.Logger
+	log := c.cfg.Logger
 	// The default pagination limit is 100.
 	args := &kinesis.DescribeStreamInput{
 		StreamName: aws.String(c.streamName),
@@ -353,7 +368,7 @@ func (c *Consumer) getShardIDs(startShardID string, shardInfo map[string]bool) e
 			c.shardStatus[*s.ShardId] = &ShardStatus{
 				ID:                     *s.ShardId,
 				ParentShardId:          aws.StringValue(s.ParentShardId),
-				Mux:                    &sync.Mutex{},
+				mux:                    &sync.Mutex{},
 				StartingSequenceNumber: aws.StringValue(s.SequenceNumberRange.StartingSequenceNumber),
 				EndingSequenceNumber:   aws.StringValue(s.SequenceNumberRange.EndingSequenceNumber),
 			}
@@ -374,7 +389,7 @@ func (c *Consumer) getShardIDs(startShardID string, shardInfo map[string]bool) e
 
 // syncShard to sync the cached shard info with actual shard info from Kinesis
 func (c *Consumer) syncShard() error {
-	log := c.kclConfig.Logger
+	log := c.cfg.Logger
 	shardInfo := make(map[string]bool)
 	err := c.getShardIDs("", shardInfo)
 	if err != nil {
@@ -385,6 +400,7 @@ func (c *Consumer) syncShard() error {
 		// The cached shard no longer existed, remove it.
 		if _, ok := shardInfo[shard.ID]; !ok {
 			// remove the shard from local status cache
+			// TODO: move after RemoveLeaseInfo?
 			delete(c.shardStatus, shard.ID)
 			// remove the shard entry in dynamoDB as well
 			// Note: syncShard runs periodically. we don't need to do anything in case of error here.

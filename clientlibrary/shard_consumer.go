@@ -28,6 +28,7 @@
 package kcl
 
 import (
+	"context"
 	"math"
 	"sync"
 	"time"
@@ -70,6 +71,22 @@ type ExtendedSequenceNumber struct {
 	SubSequenceNumber int64
 }
 
+type ShardInfo struct {
+	ID            string
+	ParentShardID string
+
+	// Checkpoint is the last checkpoint.
+	Checkpoint   string
+	AssignedTo   string
+	LeaseTimeout time.Time
+	// Shard Range
+	StartingSequenceNumber string
+	// child shard doesn't have end sequence number
+	EndingSequenceNumber string
+}
+
+// ShardStatus represents a shard consumer's progress in a shard.
+// NB: this type is passed around and mutated.
 type ShardStatus struct {
 	ID            string
 	ParentShardId string
@@ -77,7 +94,7 @@ type ShardStatus struct {
 	// Checkpoint is the last checkpoint.
 	Checkpoint   string
 	AssignedTo   string
-	Mux          *sync.Mutex
+	mux          *sync.Mutex
 	LeaseTimeout time.Time
 	// Shard Range
 	StartingSequenceNumber string
@@ -86,36 +103,200 @@ type ShardStatus struct {
 }
 
 func (ss *ShardStatus) GetLeaseOwner() string {
-	ss.Mux.Lock()
-	defer ss.Mux.Unlock()
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
 	return ss.AssignedTo
 }
 
 func (ss *ShardStatus) SetLeaseOwner(owner string) {
-	ss.Mux.Lock()
-	defer ss.Mux.Unlock()
+	ss.mux.Lock()
+	defer ss.mux.Unlock()
 	ss.AssignedTo = owner
 }
 
 type ShardConsumerState int
 
 // ShardConsumer is responsible for consuming data records of a (specified) shard.
-// Note: ShardConsumer only deal with one shard.
 type ShardConsumer struct {
 	streamName      string
 	shard           *ShardStatus
 	kc              kinesisiface.KinesisAPI
 	checkpointer    Checkpointer
 	recordProcessor RecordProcessor
-	kclConfig       *KinesisClientLibConfiguration
+	cfg             *KinesisClientLibConfiguration
 	stop            *chan struct{}
 	consumerID      string
-	mService        MonitoringService
+	metrics         MonitoringService
 	state           ShardConsumerState
 }
 
-func (sc *ShardConsumer) getShardIterator(shard *ShardStatus) (*string, error) {
-	log := sc.kclConfig.Logger
+// run continously poll the shard for records, until the lease ends.
+// entry point for consumer.
+// Precondition: it currently has the lease on the shard.
+func (sc *ShardConsumer) run(ctx context.Context) error {
+	defer sc.releaseLease()
+	log := sc.cfg.Logger
+	shard := sc.shard
+
+	// If the shard is child shard, need to wait until the parent finished.
+	if err := sc.waitOnParentShard(); err != nil {
+		// If parent shard has been deleted by Kinesis system already, just ignore the error.
+		if err != ErrSequenceIDNotFound {
+			log.Errorf("Error in waiting for parent shard: %v to finish. Error: %+v", shard.ParentShardId, err)
+			return err
+		}
+	}
+
+	shardIterator, err := sc.getShardIterator(ctx)
+	if err != nil {
+		log.Errorf("Unable to get shard iterator for %s: %v", shard.ID, err)
+		return err
+	}
+
+	// Start processing events and notify record processor on shard and starting checkpoint
+	sc.recordProcessor.Initialize(&InitializationInput{
+		ShardID:                shard.ID,
+		ExtendedSequenceNumber: &ExtendedSequenceNumber{SequenceNumber: aws.String(shard.Checkpoint)},
+	})
+
+	recordCheckpointer := NewRecordProcessorCheckpointer(shard, sc.checkpointer)
+	retriedErrors := 0
+
+	// TODO: add timeout
+	// each iter: { call GetRecords, call RecordProcessor, check lease status and control accordingly }
+	for {
+
+		if time.Now().UTC().After(shard.LeaseTimeout.Add(-time.Duration(sc.cfg.LeaseRefreshPeriodMillis) * time.Millisecond)) {
+			log.Debugf("Refreshing lease on shard: %s for worker: %s", shard.ID, sc.consumerID)
+			err = sc.checkpointer.GetLease(ctx, shard, sc.consumerID)
+			if err != nil {
+				if err.Error() == ErrLeaseNotAquired {
+					log.Warnf("Failed in acquiring lease on shard: %s for worker: %s", shard.ID, sc.consumerID)
+					return nil
+				}
+				// log and return error
+				log.Errorf("Error in refreshing lease on shard: %s for worker: %s. Error: %+v",
+					shard.ID, sc.consumerID, err)
+				return err
+			}
+		}
+
+		getRecordsStartTime := time.Now()
+
+		log.Debugf("Trying to read %d record from iterator: %v", sc.cfg.MaxRecords, aws.StringValue(shardIterator))
+		getRecordsArgs := &kinesis.GetRecordsInput{
+			Limit:         aws.Int64(int64(sc.cfg.MaxRecords)),
+			ShardIterator: shardIterator,
+		}
+		// Get records from stream and retry as needed
+		getResp, err := sc.kc.GetRecordsWithContext(ctx, getRecordsArgs)
+		if err != nil {
+			if awsErr, ok := err.(awserr.Error); ok {
+				if awsErr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException || awsErr.Code() == ErrCodeKMSThrottlingException {
+					log.Errorf("Error getting records from shard %v: %+v", shard.ID, err)
+					retriedErrors++
+					// exponential backoff
+					// https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Programming.Errors.html#Programming.Errors.RetryAndBackoff
+					time.Sleep(time.Duration(math.Exp2(float64(retriedErrors))*100) * time.Millisecond)
+					continue
+				}
+			}
+			log.Errorf("Error getting records from Kinesis that cannot be retried: %+v Request: %s", err, getRecordsArgs)
+			return err
+		}
+
+		// Convert from nanoseconds to milliseconds
+		getRecordsTimeMS := time.Since(getRecordsStartTime) / 1000000
+		sc.metrics.RecordGetRecordsTime(shard.ID, float64(getRecordsTimeMS))
+
+		// reset the retry count after success
+		retriedErrors = 0
+
+		// IRecordProcessorCheckpointer
+		input := &ProcessRecordsInput{
+			Records:            getResp.Records,
+			MillisBehindLatest: aws.Int64Value(getResp.MillisBehindLatest),
+			Checkpointer:       recordCheckpointer,
+		}
+
+		recordLength := len(input.Records)
+		recordBytes := int64(0)
+		log.Debugf("Received %d records, MillisBehindLatest: %v", recordLength, input.MillisBehindLatest)
+
+		for _, r := range getResp.Records {
+			recordBytes += int64(len(r.Data))
+		}
+
+		if recordLength > 0 || sc.cfg.CallProcessRecordsEvenForEmptyRecordList {
+			processRecordsStartTime := time.Now()
+
+			// Delivery the events to the record processor
+			sc.recordProcessor.ProcessRecords(input)
+
+			// Convert from nanoseconds to milliseconds
+			processedRecordsTiming := time.Since(processRecordsStartTime) / 1000000
+			sc.metrics.RecordProcessRecordsTime(shard.ID, float64(processedRecordsTiming))
+		}
+
+		sc.metrics.IncrRecordsProcessed(shard.ID, recordLength)
+		sc.metrics.IncrBytesProcessed(shard.ID, recordBytes)
+		sc.metrics.MillisBehindLatest(shard.ID, float64(*getResp.MillisBehindLatest))
+
+		// Idle between each read, the user is responsible for checkpoint the progress
+		// This value is only used when no records are returned; if records are returned, it should immediately
+		// retrieve the next set of records.
+		if recordLength == 0 && aws.Int64Value(getResp.MillisBehindLatest) < int64(sc.cfg.IdleTimeBetweenReadsInMillis) {
+			time.Sleep(time.Duration(sc.cfg.IdleTimeBetweenReadsInMillis) * time.Millisecond)
+		}
+
+		// The shard has been closed, so no new records can be read from it
+		if getResp.NextShardIterator == nil {
+			log.Infof("Shard %s closed", shard.ID)
+			shutdownInput := &ShutdownInput{ShutdownReason: TERMINATE, Checkpointer: recordCheckpointer}
+			sc.recordProcessor.Shutdown(shutdownInput)
+			return nil
+		}
+		shardIterator = getResp.NextShardIterator
+
+		select {
+		case <-*sc.stop:
+			shutdownInput := &ShutdownInput{ShutdownReason: REQUESTED, Checkpointer: recordCheckpointer}
+			sc.recordProcessor.Shutdown(shutdownInput)
+			return nil
+		default:
+		}
+	}
+}
+
+// Need to wait until the parent shard finished
+func (sc *ShardConsumer) waitOnParentShard() error {
+	shard := sc.shard
+	if len(shard.ParentShardId) == 0 {
+		return nil
+	}
+
+	pshard := &ShardStatus{
+		ID:  shard.ParentShardId,
+		mux: &sync.Mutex{},
+	}
+
+	for {
+		if err := sc.checkpointer.FetchCheckpoint(pshard); err != nil {
+			return err
+		}
+
+		// Parent shard is finished.
+		if pshard.Checkpoint == SHARD_END {
+			return nil
+		}
+
+		time.Sleep(time.Duration(sc.cfg.ParentShardPollIntervalMillis) * time.Millisecond)
+	}
+}
+
+func (sc *ShardConsumer) getShardIterator(ctx context.Context) (*string, error) {
+	shard := sc.shard
+	log := sc.cfg.Logger
 
 	// Get checkpoint of the shard from dynamoDB
 	err := sc.checkpointer.FetchCheckpoint(shard)
@@ -124,8 +305,9 @@ func (sc *ShardConsumer) getShardIterator(shard *ShardStatus) (*string, error) {
 	}
 
 	// If there isn't any checkpoint for the shard, use the configuration value.
+	// TODO: configurable
 	if shard.Checkpoint == "" {
-		initPos := sc.kclConfig.InitialPositionInStream
+		initPos := sc.cfg.InitialPositionInStream
 		shardIteratorType := InitalPositionInStreamToShardIteratorType(initPos)
 		log.Debugf("No checkpoint recorded for shard: %v, starting with: %v", shard.ID,
 			aws.StringValue(shardIteratorType))
@@ -135,7 +317,7 @@ func (sc *ShardConsumer) getShardIterator(shard *ShardStatus) (*string, error) {
 			shardIterArgs = &kinesis.GetShardIteratorInput{
 				ShardId:           &shard.ID,
 				ShardIteratorType: shardIteratorType,
-				Timestamp:         sc.kclConfig.InitialPositionInStreamExtended.Timestamp,
+				Timestamp:         sc.cfg.InitialPositionInStreamExtended.Timestamp,
 				StreamName:        &sc.streamName,
 			}
 		} else {
@@ -167,169 +349,11 @@ func (sc *ShardConsumer) getShardIterator(shard *ShardStatus) (*string, error) {
 	return iterResp.ShardIterator, nil
 }
 
-// getRecords continously poll one shard for data record
-// Precondition: it currently has the lease on the shard.
-func (sc *ShardConsumer) getRecords(shard *ShardStatus) error {
-	defer sc.releaseLease(shard)
-
-	log := sc.kclConfig.Logger
-
-	// If the shard is child shard, need to wait until the parent finished.
-	if err := sc.waitOnParentShard(shard); err != nil {
-		// If parent shard has been deleted by Kinesis system already, just ignore the error.
-		if err != ErrSequenceIDNotFound {
-			log.Errorf("Error in waiting for parent shard: %v to finish. Error: %+v", shard.ParentShardId, err)
-			return err
-		}
-	}
-
-	shardIterator, err := sc.getShardIterator(shard)
-	if err != nil {
-		log.Errorf("Unable to get shard iterator for %s: %v", shard.ID, err)
-		return err
-	}
-
-	// Start processing events and notify record processor on shard and starting checkpoint
-	sc.recordProcessor.Initialize(&InitializationInput{
-		ShardId:                shard.ID,
-		ExtendedSequenceNumber: &ExtendedSequenceNumber{SequenceNumber: aws.String(shard.Checkpoint)},
-	})
-
-	recordCheckpointer := NewRecordProcessorCheckpoint(shard, sc.checkpointer)
-	retriedErrors := 0
-
-	// TODO: add timeout
-	for {
-		if time.Now().UTC().After(shard.LeaseTimeout.Add(-time.Duration(sc.kclConfig.LeaseRefreshPeriodMillis) * time.Millisecond)) {
-			log.Debugf("Refreshing lease on shard: %s for worker: %s", shard.ID, sc.consumerID)
-			err = sc.checkpointer.GetLease(shard, sc.consumerID)
-			if err != nil {
-				if err.Error() == ErrLeaseNotAquired {
-					log.Warnf("Failed in acquiring lease on shard: %s for worker: %s", shard.ID, sc.consumerID)
-					return nil
-				}
-				// log and return error
-				log.Errorf("Error in refreshing lease on shard: %s for worker: %s. Error: %+v",
-					shard.ID, sc.consumerID, err)
-				return err
-			}
-		}
-
-		getRecordsStartTime := time.Now()
-
-		log.Debugf("Trying to read %d record from iterator: %v", sc.kclConfig.MaxRecords, aws.StringValue(shardIterator))
-		getRecordsArgs := &kinesis.GetRecordsInput{
-			Limit:         aws.Int64(int64(sc.kclConfig.MaxRecords)),
-			ShardIterator: shardIterator,
-		}
-		// Get records from stream and retry as needed
-		getResp, err := sc.kc.GetRecords(getRecordsArgs)
-		if err != nil {
-			if awsErr, ok := err.(awserr.Error); ok {
-				if awsErr.Code() == kinesis.ErrCodeProvisionedThroughputExceededException || awsErr.Code() == ErrCodeKMSThrottlingException {
-					log.Errorf("Error getting records from shard %v: %+v", shard.ID, err)
-					retriedErrors++
-					// exponential backoff
-					// https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Programming.Errors.html#Programming.Errors.RetryAndBackoff
-					time.Sleep(time.Duration(math.Exp2(float64(retriedErrors))*100) * time.Millisecond)
-					continue
-				}
-			}
-			log.Errorf("Error getting records from Kinesis that cannot be retried: %+v Request: %s", err, getRecordsArgs)
-			return err
-		}
-
-		// Convert from nanoseconds to milliseconds
-		getRecordsTimeMS := time.Since(getRecordsStartTime) / 1000000
-		sc.mService.RecordGetRecordsTime(shard.ID, float64(getRecordsTimeMS))
-
-		// reset the retry count after success
-		retriedErrors = 0
-
-		// IRecordProcessorCheckpointer
-		input := &ProcessRecordsInput{
-			Records:            getResp.Records,
-			MillisBehindLatest: aws.Int64Value(getResp.MillisBehindLatest),
-			Checkpointer:       recordCheckpointer,
-		}
-
-		recordLength := len(input.Records)
-		recordBytes := int64(0)
-		log.Debugf("Received %d records, MillisBehindLatest: %v", recordLength, input.MillisBehindLatest)
-
-		for _, r := range getResp.Records {
-			recordBytes += int64(len(r.Data))
-		}
-
-		if recordLength > 0 || sc.kclConfig.CallProcessRecordsEvenForEmptyRecordList {
-			processRecordsStartTime := time.Now()
-
-			// Delivery the events to the record processor
-			sc.recordProcessor.ProcessRecords(input)
-
-			// Convert from nanoseconds to milliseconds
-			processedRecordsTiming := time.Since(processRecordsStartTime) / 1000000
-			sc.mService.RecordProcessRecordsTime(shard.ID, float64(processedRecordsTiming))
-		}
-
-		sc.mService.IncrRecordsProcessed(shard.ID, recordLength)
-		sc.mService.IncrBytesProcessed(shard.ID, recordBytes)
-		sc.mService.MillisBehindLatest(shard.ID, float64(*getResp.MillisBehindLatest))
-
-		// Idle between each read, the user is responsible for checkpoint the progress
-		// This value is only used when no records are returned; if records are returned, it should immediately
-		// retrieve the next set of records.
-		if recordLength == 0 && aws.Int64Value(getResp.MillisBehindLatest) < int64(sc.kclConfig.IdleTimeBetweenReadsInMillis) {
-			time.Sleep(time.Duration(sc.kclConfig.IdleTimeBetweenReadsInMillis) * time.Millisecond)
-		}
-
-		// The shard has been closed, so no new records can be read from it
-		if getResp.NextShardIterator == nil {
-			log.Infof("Shard %s closed", shard.ID)
-			shutdownInput := &ShutdownInput{ShutdownReason: TERMINATE, Checkpointer: recordCheckpointer}
-			sc.recordProcessor.Shutdown(shutdownInput)
-			return nil
-		}
-		shardIterator = getResp.NextShardIterator
-
-		select {
-		case <-*sc.stop:
-			shutdownInput := &ShutdownInput{ShutdownReason: REQUESTED, Checkpointer: recordCheckpointer}
-			sc.recordProcessor.Shutdown(shutdownInput)
-			return nil
-		default:
-		}
-	}
-}
-
-// Need to wait until the parent shard finished
-func (sc *ShardConsumer) waitOnParentShard(shard *ShardStatus) error {
-	if len(shard.ParentShardId) == 0 {
-		return nil
-	}
-
-	pshard := &ShardStatus{
-		ID:  shard.ParentShardId,
-		Mux: &sync.Mutex{},
-	}
-
-	for {
-		if err := sc.checkpointer.FetchCheckpoint(pshard); err != nil {
-			return err
-		}
-
-		// Parent shard is finished.
-		if pshard.Checkpoint == SHARD_END {
-			return nil
-		}
-
-		time.Sleep(time.Duration(sc.kclConfig.ParentShardPollIntervalMillis) * time.Millisecond)
-	}
-}
-
 // Cleanup the internal lease cache
-func (sc *ShardConsumer) releaseLease(shard *ShardStatus) {
-	log := sc.kclConfig.Logger
+// Mutates shard { SetLeaseOwner }
+func (sc *ShardConsumer) releaseLease() {
+	log := sc.cfg.Logger
+	shard := sc.shard
 	log.Infof("Release lease for shard %s", shard.ID)
 	shard.SetLeaseOwner("")
 
@@ -340,5 +364,5 @@ func (sc *ShardConsumer) releaseLease(shard *ShardStatus) {
 	}
 
 	// reporting lease lose metrics
-	sc.mService.LeaseLost(shard.ID)
+	sc.metrics.LeaseLost(shard.ID)
 }

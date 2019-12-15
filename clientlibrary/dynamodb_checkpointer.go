@@ -28,6 +28,7 @@
 package kcl
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -38,7 +39,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 
-	//"github.com/vmware/vmware-go-kcl/clientlibrary/config"
 	"github.com/vmware/vmware-go-kcl/logger"
 )
 
@@ -50,8 +50,8 @@ const (
 	NumMaxRetries = 5
 )
 
-// DynamoCheckpoint implements the Checkpoint interface using DynamoDB as a backend
-type DynamoCheckpoint struct {
+// DynamoDbCheckpointer implements the Checkpoint interface using DynamoDB as a backend
+type DynamoDbCheckpointer struct {
 	log                     logger.Logger
 	TableName               string
 	leaseTableReadCapacity  int64
@@ -63,8 +63,8 @@ type DynamoCheckpoint struct {
 	Retries       int
 }
 
-func NewDynamoCheckpoint(cfg *KinesisClientLibConfiguration) *DynamoCheckpoint {
-	checkpointer := &DynamoCheckpoint{
+func NewDynamoDbCheckpointer(cfg *KinesisClientLibConfiguration) *DynamoDbCheckpointer {
+	checkpointer := &DynamoDbCheckpointer{
 		log:                     cfg.Logger,
 		TableName:               cfg.TableName,
 		leaseTableReadCapacity:  int64(cfg.InitialLeaseTableReadCapacity),
@@ -77,40 +77,41 @@ func NewDynamoCheckpoint(cfg *KinesisClientLibConfiguration) *DynamoCheckpoint {
 }
 
 // WithDynamoDB is used to provide DynamoDB service
-func (checkpointer *DynamoCheckpoint) WithDynamoDB(svc dynamodbiface.DynamoDBAPI) *DynamoCheckpoint {
+func (checkpointer *DynamoDbCheckpointer) WithDynamoDB(svc dynamodbiface.DynamoDBAPI) *DynamoDbCheckpointer {
 	checkpointer.svc = svc
 	return checkpointer
 }
 
 // Init initialises the DynamoDB Checkpoint
-func (checkpointer *DynamoCheckpoint) Init() error {
-	checkpointer.log.Infof("Creating DynamoDB session")
+func (cp *DynamoDbCheckpointer) Init() error {
+	cp.log.Infof("Creating DynamoDB session")
 	s, err := session.NewSession(&aws.Config{
-		Region:      aws.String(checkpointer.kclConfig.RegionName),
-		Endpoint:    aws.String(checkpointer.kclConfig.DynamoDBEndpoint),
-		Credentials: checkpointer.kclConfig.DynamoDBCredentials,
-		Retryer:     client.DefaultRetryer{NumMaxRetries: checkpointer.Retries},
+		Region:      aws.String(cp.kclConfig.RegionName),
+		Endpoint:    aws.String(cp.kclConfig.DynamoDBEndpoint),
+		Credentials: cp.kclConfig.DynamoDBCredentials,
+		Retryer:     client.DefaultRetryer{NumMaxRetries: cp.Retries},
 	})
 	if err != nil {
 		// no need to move forward
-		checkpointer.log.Fatalf("Failed in getting DynamoDB session for creating Worker: %+v", err)
+		cp.log.Fatalf("Failed in getting DynamoDB session for creating Worker: %+v", err)
 	}
 
-	if checkpointer.svc == nil {
-		checkpointer.svc = dynamodb.New(s)
+	if cp.svc == nil {
+		cp.svc = dynamodb.New(s)
 	}
 
-	if !checkpointer.doesTableExist() {
-		return checkpointer.createTable()
+	if !cp.doesTableExist() {
+		return cp.createTable()
 	}
 	return nil
 }
 
 // GetLease attempts to gain a lock on the given shard
-func (checkpointer *DynamoCheckpoint) GetLease(shard *ShardStatus, newAssignTo string) error {
-	newLeaseTimeout := time.Now().Add(time.Duration(checkpointer.LeaseDuration) * time.Millisecond).UTC()
+// Mutates { shard.AssignedTo, LeaseExpires }
+func (cp *DynamoDbCheckpointer) GetLease(ctx context.Context, shard *ShardStatus, newAssignTo string) error {
+	newLeaseTimeout := time.Now().Add(time.Duration(cp.LeaseDuration) * time.Millisecond).UTC()
 	newLeaseTimeoutString := newLeaseTimeout.Format(time.RFC3339)
-	currentCheckpoint, err := checkpointer.getItem(shard.ID)
+	currentCheckpoint, err := cp.getItem(shard.ID)
 	if err != nil {
 		return err
 	}
@@ -135,7 +136,7 @@ func (checkpointer *DynamoCheckpoint) GetLease(shard *ShardStatus, newAssignTo s
 			return errors.New(ErrLeaseNotAquired)
 		}
 
-		checkpointer.log.Debugf("Attempting to get a lock for shard: %s, leaseTimeout: %s, assignedTo: %s", shard.ID, currentLeaseTimeout, assignedTo)
+		cp.log.Debugf("Attempting to get a lock for shard: %s, leaseTimeout: %s, assignedTo: %s", shard.ID, currentLeaseTimeout, assignedTo)
 		conditionalExpression = "ShardID = :id AND AssignedTo = :assigned_to AND LeaseTimeout = :lease_timeout"
 		expressionAttributeValues = map[string]*dynamodb.AttributeValue{
 			":id": {
@@ -172,7 +173,7 @@ func (checkpointer *DynamoCheckpoint) GetLease(shard *ShardStatus, newAssignTo s
 		}
 	}
 
-	err = checkpointer.conditionalUpdate(conditionalExpression, expressionAttributeValues, marshalledCheckpoint)
+	err = cp.conditionalUpdate(conditionalExpression, expressionAttributeValues, marshalledCheckpoint)
 	if err != nil {
 		if awsErr, ok := err.(awserr.Error); ok {
 			if awsErr.Code() == dynamodb.ErrCodeConditionalCheckFailedException {
@@ -182,16 +183,17 @@ func (checkpointer *DynamoCheckpoint) GetLease(shard *ShardStatus, newAssignTo s
 		return err
 	}
 
-	shard.Mux.Lock()
+	shard.mux.Lock()
 	shard.AssignedTo = newAssignTo
 	shard.LeaseTimeout = newLeaseTimeout
-	shard.Mux.Unlock()
+	shard.mux.Unlock()
 
 	return nil
 }
 
 // CheckpointSequence writes a checkpoint at the designated sequence ID
-func (checkpointer *DynamoCheckpoint) CheckpointSequence(shard *ShardStatus) error {
+// Does NOT mutate shard.
+func (cp *DynamoDbCheckpointer) CheckpointSequence(shard *ShardStatus) error {
 	leaseTimeout := shard.LeaseTimeout.UTC().Format(time.RFC3339)
 	marshalledCheckpoint := map[string]*dynamodb.AttributeValue{
 		LEASE_KEY_KEY: {
@@ -212,12 +214,13 @@ func (checkpointer *DynamoCheckpoint) CheckpointSequence(shard *ShardStatus) err
 		marshalledCheckpoint[PARENT_SHARD_ID_KEY] = &dynamodb.AttributeValue{S: &shard.ParentShardId}
 	}
 
-	return checkpointer.saveItem(marshalledCheckpoint)
+	return cp.saveItem(marshalledCheckpoint)
 }
 
 // FetchCheckpoint retrieves the checkpoint for the given shard
-func (checkpointer *DynamoCheckpoint) FetchCheckpoint(shard *ShardStatus) error {
-	row, err := checkpointer.getItem(shard.ID)
+// Mutates { shard.Checkpoint, shard.AssignedTo }
+func (cp *DynamoDbCheckpointer) FetchCheckpoint(shard *ShardStatus) error {
+	row, err := cp.getItem(shard.ID)
 	if err != nil {
 		return err
 	}
@@ -226,9 +229,9 @@ func (checkpointer *DynamoCheckpoint) FetchCheckpoint(shard *ShardStatus) error 
 	if !ok {
 		return ErrSequenceIDNotFound
 	}
-	checkpointer.log.Debugf("Retrieved Shard Iterator %s", *sequenceID.S)
-	shard.Mux.Lock()
-	defer shard.Mux.Unlock()
+	cp.log.Debugf("Retrieved Shard Iterator %s", *sequenceID.S)
+	shard.mux.Lock()
+	defer shard.mux.Unlock()
 	shard.Checkpoint = aws.StringValue(sequenceID.S)
 
 	if assignedTo, ok := row[LEASE_OWNER_KEY]; ok {
@@ -238,20 +241,20 @@ func (checkpointer *DynamoCheckpoint) FetchCheckpoint(shard *ShardStatus) error 
 }
 
 // RemoveLeaseInfo to remove lease info for shard entry in dynamoDB because the shard no longer exists in Kinesis
-func (checkpointer *DynamoCheckpoint) RemoveLeaseInfo(shardID string) error {
-	err := checkpointer.removeItem(shardID)
+func (cp *DynamoDbCheckpointer) RemoveLeaseInfo(shardID string) error {
+	err := cp.removeItem(shardID)
 	if err != nil {
-		checkpointer.log.Errorf("Error in removing lease info for shard: %s, Error: %+v", shardID, err)
+		cp.log.Errorf("Error in removing lease info for shard: %s, Error: %+v", shardID, err)
 	} else {
-		checkpointer.log.Infof("Lease info for shard: %s has been removed.", shardID)
+		cp.log.Infof("Lease info for shard: %s has been removed.", shardID)
 	}
 	return err
 }
 
 // RemoveLeaseOwner to remove lease owner for the shard entry
-func (checkpointer *DynamoCheckpoint) RemoveLeaseOwner(shardID string) error {
+func (cp *DynamoDbCheckpointer) RemoveLeaseOwner(shardID string) error {
 	input := &dynamodb.UpdateItemInput{
-		TableName: aws.String(checkpointer.TableName),
+		TableName: aws.String(cp.TableName),
 		Key: map[string]*dynamodb.AttributeValue{
 			LEASE_KEY_KEY: {
 				S: aws.String(shardID),
@@ -260,12 +263,12 @@ func (checkpointer *DynamoCheckpoint) RemoveLeaseOwner(shardID string) error {
 		UpdateExpression: aws.String("remove " + LEASE_OWNER_KEY),
 	}
 
-	_, err := checkpointer.svc.UpdateItem(input)
+	_, err := cp.svc.UpdateItem(input)
 
 	return err
 }
 
-func (checkpointer *DynamoCheckpoint) createTable() error {
+func (cp *DynamoDbCheckpointer) createTable() error {
 	input := &dynamodb.CreateTableInput{
 		AttributeDefinitions: []*dynamodb.AttributeDefinition{
 			{
@@ -280,47 +283,47 @@ func (checkpointer *DynamoCheckpoint) createTable() error {
 			},
 		},
 		ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
-			ReadCapacityUnits:  aws.Int64(checkpointer.leaseTableReadCapacity),
-			WriteCapacityUnits: aws.Int64(checkpointer.leaseTableWriteCapacity),
+			ReadCapacityUnits:  aws.Int64(cp.leaseTableReadCapacity),
+			WriteCapacityUnits: aws.Int64(cp.leaseTableWriteCapacity),
 		},
-		TableName: aws.String(checkpointer.TableName),
+		TableName: aws.String(cp.TableName),
 	}
-	_, err := checkpointer.svc.CreateTable(input)
+	_, err := cp.svc.CreateTable(input)
 	return err
 }
 
-func (checkpointer *DynamoCheckpoint) doesTableExist() bool {
+func (cp *DynamoDbCheckpointer) doesTableExist() bool {
 	input := &dynamodb.DescribeTableInput{
-		TableName: aws.String(checkpointer.TableName),
+		TableName: aws.String(cp.TableName),
 	}
-	_, err := checkpointer.svc.DescribeTable(input)
+	_, err := cp.svc.DescribeTable(input)
 	return err == nil
 }
 
-func (checkpointer *DynamoCheckpoint) saveItem(item map[string]*dynamodb.AttributeValue) error {
-	return checkpointer.putItem(&dynamodb.PutItemInput{
-		TableName: aws.String(checkpointer.TableName),
+func (cp *DynamoDbCheckpointer) saveItem(item map[string]*dynamodb.AttributeValue) error {
+	return cp.putItem(&dynamodb.PutItemInput{
+		TableName: aws.String(cp.TableName),
 		Item:      item,
 	})
 }
 
-func (checkpointer *DynamoCheckpoint) conditionalUpdate(conditionExpression string, expressionAttributeValues map[string]*dynamodb.AttributeValue, item map[string]*dynamodb.AttributeValue) error {
-	return checkpointer.putItem(&dynamodb.PutItemInput{
+func (cp *DynamoDbCheckpointer) conditionalUpdate(conditionExpression string, expressionAttributeValues map[string]*dynamodb.AttributeValue, item map[string]*dynamodb.AttributeValue) error {
+	return cp.putItem(&dynamodb.PutItemInput{
 		ConditionExpression:       aws.String(conditionExpression),
-		TableName:                 aws.String(checkpointer.TableName),
+		TableName:                 aws.String(cp.TableName),
 		Item:                      item,
 		ExpressionAttributeValues: expressionAttributeValues,
 	})
 }
 
-func (checkpointer *DynamoCheckpoint) putItem(input *dynamodb.PutItemInput) error {
-	_, err := checkpointer.svc.PutItem(input)
+func (cp *DynamoDbCheckpointer) putItem(input *dynamodb.PutItemInput) error {
+	_, err := cp.svc.PutItem(input)
 	return err
 }
 
-func (checkpointer *DynamoCheckpoint) getItem(shardID string) (map[string]*dynamodb.AttributeValue, error) {
-	item, err := checkpointer.svc.GetItem(&dynamodb.GetItemInput{
-		TableName: aws.String(checkpointer.TableName),
+func (cp *DynamoDbCheckpointer) getItem(shardID string) (map[string]*dynamodb.AttributeValue, error) {
+	item, err := cp.svc.GetItem(&dynamodb.GetItemInput{
+		TableName: aws.String(cp.TableName),
 		Key: map[string]*dynamodb.AttributeValue{
 			LEASE_KEY_KEY: {
 				S: aws.String(shardID),
@@ -330,9 +333,9 @@ func (checkpointer *DynamoCheckpoint) getItem(shardID string) (map[string]*dynam
 	return item.Item, err
 }
 
-func (checkpointer *DynamoCheckpoint) removeItem(shardID string) error {
-	_, err := checkpointer.svc.DeleteItem(&dynamodb.DeleteItemInput{
-		TableName: aws.String(checkpointer.TableName),
+func (cp *DynamoDbCheckpointer) removeItem(shardID string) error {
+	_, err := cp.svc.DeleteItem(&dynamodb.DeleteItemInput{
+		TableName: aws.String(cp.TableName),
 		Key: map[string]*dynamodb.AttributeValue{
 			LEASE_KEY_KEY: {
 				S: aws.String(shardID),
