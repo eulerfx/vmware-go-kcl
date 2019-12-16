@@ -40,7 +40,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 
-	kcl "github.com/vmware/vmware-go-kcl/consumer"
+	"github.com/vmware/vmware-go-kcl/kcl"
 )
 
 func TestDoesTableExist(t *testing.T) {

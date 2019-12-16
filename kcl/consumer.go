@@ -38,6 +38,8 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+
+	//db "github.com/vmware/vmware-go-kcl/consumer/dynamodb"
 )
 
 // Consumer is the high level class that Kinesis applications use to start processing data. It initializes and oversees
@@ -183,14 +185,15 @@ func (c *Consumer) init() error {
 		log.Infof("Use custom Kinesis service.")
 	}
 
-	// // Create default dynamodb based checkpointer implementation
-	// if c.checkpointer == nil {
-	// 	log.Infof("Creating DynamoDB based checkpointer")
-	// 	cp := db.NewCheckpointer(c.cfg)
-	// 	c.checkpointer = cp
-	// } else {
-	// 	log.Infof("Use custom checkpointer implementation.")
-	// }
+	// Create default dynamodb based checkpointer implementation
+	if c.checkpointer == nil {
+		log.Infof("Creating DynamoDB based checkpointer")
+		//cp := db.NewCheckpointer(c.cfg)
+		//cp = cp
+		//c.checkpointer = cp
+	} else {
+		log.Infof("Use custom checkpointer implementation.")
+	}
 
 	err := c.metrics.Init(c.cfg.ApplicationName, c.streamName, c.workerID)
 	if err != nil {
