@@ -17,6 +17,7 @@ require (
 	golang.org/x/net v0.0.0-20190522155817-f3200d17e092 // indirect
 	golang.org/x/sys v0.0.0-20190528012530-adf421d2caf4 // indirect
 	golang.org/x/text v0.3.2 // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.0.0
 //gopkg.in/natefinch/lumberjack.v2 v2.0.0
 )
 

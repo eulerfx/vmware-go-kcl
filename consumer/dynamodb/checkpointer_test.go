@@ -40,12 +40,12 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 
-	"github.com/vmware/vmware-go-kcl/consumer/kcl"
+	kcl "github.com/vmware/vmware-go-kcl/consumer"
 )
 
 func TestDoesTableExist(t *testing.T) {
 	svc := &mockDynamoDB{tableExist: true, item: map[string]*dynamodb.AttributeValue{}}
-	checkpoint := &DynamoDbCheckpointer{
+	checkpoint := &Checkpointer{
 		TableName: "TableName",
 		svc:       svc,
 	}
@@ -75,7 +75,7 @@ func TestGetLeaseNotAquired(t *testing.T) {
 	err := checkpoint.GetLease(ctx, &kcl.ShardStatus{
 		ID:         "0001",
 		Checkpoint: "",
-		mux:        &sync.Mutex{},
+		Mux:        &sync.Mutex{},
 	}, "abcd-efgh")
 	if err != nil {
 		t.Errorf("Error getting lease %s", err)
@@ -84,7 +84,7 @@ func TestGetLeaseNotAquired(t *testing.T) {
 	err = checkpoint.GetLease(ctx, &kcl.ShardStatus{
 		ID:         "0001",
 		Checkpoint: "",
-		mux:        &sync.Mutex{},
+		Mux:        &sync.Mutex{},
 	}, "ijkl-mnop")
 	if err == nil || err.Error() != kcl.ErrLeaseNotAquired {
 		t.Errorf("Got a lease when it was already held by abcd-efgh: %s", err)
@@ -124,7 +124,7 @@ func TestGetLeaseAquired(t *testing.T) {
 	shard := &kcl.ShardStatus{
 		ID:         "0001",
 		Checkpoint: "deadbeef",
-		mux:        &sync.Mutex{},
+		Mux:        &sync.Mutex{},
 	}
 	err := checkpoint.GetLease(context.Background(), shard, "ijkl-mnop")
 
@@ -146,7 +146,7 @@ func TestGetLeaseAquired(t *testing.T) {
 
 	status := &kcl.ShardStatus{
 		ID:  shard.ID,
-		mux: &sync.Mutex{},
+		Mux: &sync.Mutex{},
 	}
 	checkpoint.FetchCheckpoint(ctx, status)
 

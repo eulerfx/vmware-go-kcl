@@ -363,7 +363,7 @@ func (c *Consumer) getShardIDs(startShardID string, shardInfo map[string]bool) e
 			c.shardStatus[*s.ShardId] = &ShardStatus{
 				ID:                     *s.ShardId,
 				ParentShardId:          aws.StringValue(s.ParentShardId),
-				mux:                    &sync.Mutex{},
+				Mux:                    &sync.Mutex{},
 				StartingSequenceNumber: aws.StringValue(s.SequenceNumberRange.StartingSequenceNumber),
 				EndingSequenceNumber:   aws.StringValue(s.SequenceNumberRange.EndingSequenceNumber),
 			}

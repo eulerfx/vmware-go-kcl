@@ -118,7 +118,7 @@ func NewRecordProcessorCheckpointer(shard *ShardStatus, checkpoint Checkpointer)
 // 	 *         2.) It is not a valid sequence number for a record in this shard.
 // 	 */
 func (rc *RecordProcessorCheckpointer) Checkpoint(ctx context.Context, sequenceNumber *string) error {
-	rc.shard.mux.Lock()
+	rc.shard.Mux.Lock()
 
 	// checkpoint the last sequence of a closed shard
 	if sequenceNumber == nil {
@@ -128,7 +128,7 @@ func (rc *RecordProcessorCheckpointer) Checkpoint(ctx context.Context, sequenceN
 	}
 
 	// TODO: defer?
-	rc.shard.mux.Unlock()
+	rc.shard.Mux.Unlock()
 
 	// DOES NOT mutate shard
 	err := rc.checkpoint.CheckpointSequence(ctx, rc.shard)

@@ -182,7 +182,7 @@ type ShardStatus struct {
 	// Checkpoint is the last checkpoint.
 	Checkpoint   string
 	AssignedTo   string
-	mux          *sync.Mutex
+	Mux          *sync.Mutex
 	LeaseTimeout time.Time
 	// Shard Range
 	StartingSequenceNumber string
@@ -191,14 +191,14 @@ type ShardStatus struct {
 }
 
 func (ss *ShardStatus) GetLeaseOwner() string {
-	ss.mux.Lock()
-	defer ss.mux.Unlock()
+	ss.Mux.Lock()
+	defer ss.Mux.Unlock()
 	return ss.AssignedTo
 }
 
 func (ss *ShardStatus) SetLeaseOwner(owner string) {
-	ss.mux.Lock()
-	defer ss.mux.Unlock()
+	ss.Mux.Lock()
+	defer ss.Mux.Unlock()
 	ss.AssignedTo = owner
 }
 
@@ -365,7 +365,7 @@ func (sc *ShardConsumer) waitOnParentShard(ctx context.Context) error {
 
 	pshard := &ShardStatus{
 		ID:  shard.ParentShardId,
-		mux: &sync.Mutex{},
+		Mux: &sync.Mutex{},
 	}
 
 	for {
