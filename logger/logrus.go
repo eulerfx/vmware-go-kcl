@@ -37,6 +37,11 @@ type LogrusLogger struct {
 	logger *logrus.Logger
 }
 
+// GetDefaultLogger creates a default logger.
+func GetDefaultLogger() Logger {
+	return NewLogrusLogger(logrus.StandardLogger())
+}
+
 // NewLogrusLogger adapts existing logrus logger to Logger interface.
 // The call is responsible for configuring logrus logger appropriately.
 func NewLogrusLogger(lLogger *logrus.Logger) Logger {

@@ -38,25 +38,18 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	//chk "github.com/vmware/vmware-go-kcl/clientlibrary/checkpoint"
-	//"github.com/vmware/vmware-go-kcl/clientlibrary/config"
-	//kcl "github.com/vmware/vmware-go-kcl/clientlibrary/interfaces"
-	//"github.com/vmware/vmware-go-kcl/clientlibrary/metrics"
-	//par "github.com/vmware/vmware-go-kcl/clientl//brary/partition"
 )
 
-/**
- * Consumer is the high level class that Kinesis applications use to start processing data. It initializes and oversees
- * different components (e.g. syncing shard and lease information, tracking shard assignments, and processing data from
- * the shards).
- */
+// Consumer is the high level class that Kinesis applications use to start processing data. It initializes and oversees
+// different components (e.g. syncing shard and lease information, tracking shard assignments, and processing data from
+// the shards)
 type Consumer struct {
 	streamName string
 	regionName string
 	workerID   string
 
 	makeProcessor func() RecordProcessor
-	cfg           *KinesisClientLibConfiguration
+	cfg           *ConsumerConfig
 	kc            kinesisiface.KinesisAPI
 	checkpointer  Checkpointer
 	metrics       MonitoringService
@@ -73,7 +66,7 @@ type Consumer struct {
 }
 
 // NewConsumer constructs a Worker instance for processing Kinesis stream data.
-func NewConsumer(factory func() RecordProcessor, cfg *KinesisClientLibConfiguration) *Consumer {
+func NewConsumer(factory func() RecordProcessor, cfg *ConsumerConfig) *Consumer {
 	mService := cfg.MonitoringService
 	if mService == nil {
 		// Replaces nil with noop monitor service (not emitting any metrics).
@@ -109,9 +102,9 @@ func (c *Consumer) WithCheckpointer(checker Checkpointer) *Consumer {
 }
 
 // Start starts consuming data from the stream, and pass it to the application record processors.
-func (c *Consumer) Start() error {
-	log := c.cfg.Logger
-	if err := c.initialize(); err != nil {
+func (c *Consumer) Start(ctx context.Context) error {
+	log := c.cfg.Log
+	if err := c.init(); err != nil {
 		log.Errorf("Failed to initialize Worker: %+v", err)
 		return err
 	}
@@ -128,14 +121,15 @@ func (c *Consumer) Start() error {
 	go func() {
 		defer c.shardConsumerWaitGroup.Done()
 		// entering event loop
-		c.eventLoop()
+		c.eventLoop(ctx)
 	}()
+
 	return nil
 }
 
 // Shutdown signals worker to shutdown. Worker will try initiating shutdown of all record processors.
 func (c *Consumer) Shutdown() {
-	log := c.cfg.Logger
+	log := c.cfg.Log
 	log.Infof("Worker shutdown in requested.")
 
 	if c.done {
@@ -152,7 +146,7 @@ func (c *Consumer) Shutdown() {
 
 // Publish to write some data into stream. This function is mainly used for testing purpose.
 func (c *Consumer) Publish(streamName, partitionKey string, data []byte) error {
-	log := c.cfg.Logger
+	log := c.cfg.Log
 	_, err := c.kc.PutRecord(&kinesis.PutRecordInput{
 		Data:         data,
 		StreamName:   aws.String(streamName),
@@ -164,9 +158,9 @@ func (c *Consumer) Publish(streamName, partitionKey string, data []byte) error {
 	return err
 }
 
-// initialize
-func (c *Consumer) initialize() error {
-	log := c.cfg.Logger
+// init
+func (c *Consumer) init() error {
+	log := c.cfg.Log
 	log.Infof("Worker initialization in progress...")
 
 	// Create default Kinesis session
@@ -189,13 +183,14 @@ func (c *Consumer) initialize() error {
 		log.Infof("Use custom Kinesis service.")
 	}
 
-	// Create default dynamodb based checkpointer implementation
-	if c.checkpointer == nil {
-		log.Infof("Creating DynamoDB based checkpointer")
-		c.checkpointer = NewDynamoDbCheckpointer(c.cfg)
-	} else {
-		log.Infof("Use custom checkpointer implementation.")
-	}
+	// // Create default dynamodb based checkpointer implementation
+	// if c.checkpointer == nil {
+	// 	log.Infof("Creating DynamoDB based checkpointer")
+	// 	cp := db.NewCheckpointer(c.cfg)
+	// 	c.checkpointer = cp
+	// } else {
+	// 	log.Infof("Use custom checkpointer implementation.")
+	// }
 
 	err := c.metrics.Init(c.cfg.ApplicationName, c.streamName, c.workerID)
 	if err != nil {
@@ -232,13 +227,13 @@ func (c *Consumer) newShardConsumer(shard *ShardStatus) *ShardConsumer {
 		consumerID:      c.workerID,
 		stop:            c.stop,
 		metrics:         c.metrics,
-		state:           WAITING_ON_PARENT_SHARDS,
+		//state:           WAITING_ON_PARENT_SHARDS,
 	}
 }
 
 // eventLoop
-func (c *Consumer) eventLoop() {
-	log := c.cfg.Logger
+func (c *Consumer) eventLoop(ctx context.Context) {
+	log := c.cfg.Log
 	// Add [-50%, +50%] random jitter to ShardSyncIntervalMillis. When multiple workers
 	// starts at the same time, this decreases the probability of them calling
 	// kinesis.DescribeStream at the same time, and hit the hard-limit on aws API calls.
@@ -246,7 +241,7 @@ func (c *Consumer) eventLoop() {
 	shardSyncSleep := c.cfg.ShardSyncIntervalMillis/2 + c.rng.Intn(int(c.cfg.ShardSyncIntervalMillis))
 	// each tick: { sync shard status, for each shard: { fetch checkpoint, acquire lease, and starts a shard consumer } }
 	for {
-		err := c.syncShard()
+		err := c.syncShard(ctx)
 		if err != nil {
 			log.Errorf("Error syncing shards: %+v, Retrying in %d ms...", err, shardSyncSleep)
 			time.Sleep(time.Duration(shardSyncSleep) * time.Millisecond)
@@ -275,7 +270,10 @@ func (c *Consumer) eventLoop() {
 				continue
 			}
 
-			err := c.checkpointer.FetchCheckpoint(shard)
+			// per shard consumer context.
+			ctx := context.Background()
+
+			err := c.checkpointer.FetchCheckpoint(ctx, shard)
 			if err != nil {
 				// checkpoint may not existed yet is not an error condition.
 				if err != ErrSequenceIDNotFound {
@@ -289,9 +287,6 @@ func (c *Consumer) eventLoop() {
 			if shard.Checkpoint == SHARD_END {
 				continue
 			}
-
-			// per consumer context.
-			ctx := context.Background()
 
 			err = c.checkpointer.GetLease(ctx, shard, c.workerID)
 			if err != nil {
@@ -336,7 +331,7 @@ func (c *Consumer) eventLoop() {
 // List all ACTIVE shard and store them into shardStatus table
 // If shard has been removed, need to exclude it from cached shard status.
 func (c *Consumer) getShardIDs(startShardID string, shardInfo map[string]bool) error {
-	log := c.cfg.Logger
+	log := c.cfg.Log
 	// The default pagination limit is 100.
 	args := &kinesis.DescribeStreamInput{
 		StreamName: aws.String(c.streamName),
@@ -388,8 +383,8 @@ func (c *Consumer) getShardIDs(startShardID string, shardInfo map[string]bool) e
 }
 
 // syncShard to sync the cached shard info with actual shard info from Kinesis
-func (c *Consumer) syncShard() error {
-	log := c.cfg.Logger
+func (c *Consumer) syncShard(ctx context.Context) error {
+	log := c.cfg.Log
 	shardInfo := make(map[string]bool)
 	err := c.getShardIDs("", shardInfo)
 	if err != nil {
@@ -404,7 +399,7 @@ func (c *Consumer) syncShard() error {
 			delete(c.shardStatus, shard.ID)
 			// remove the shard entry in dynamoDB as well
 			// Note: syncShard runs periodically. we don't need to do anything in case of error here.
-			if err := c.checkpointer.RemoveLeaseInfo(shard.ID); err != nil {
+			if err := c.checkpointer.RemoveLeaseInfo(ctx, shard.ID); err != nil {
 				log.Errorf("Failed to remove shard lease info: %s Error: %+v", shard.ID, err)
 			}
 		}

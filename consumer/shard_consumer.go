@@ -36,16 +36,17 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/kinesis"
+	ks "github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
 )
 
 const (
 	// This is the initial state of a shard consumer. This causes the consumer to remain blocked until the all
 	// parent shards have been completed.
-	WAITING_ON_PARENT_SHARDS ShardConsumerState = iota + 1
+	//WAITING_ON_PARENT_SHARDS ShardConsumerState = iota + 1
 
 	// This state is responsible for initializing the record processor with the shard information.
-	INITIALIZING
+	INITIALIZING = iota + 2
 
 	//
 	PROCESSING
@@ -59,7 +60,108 @@ const (
 	// ErrCodeKMSThrottlingException is defined in the API Reference https://docs.aws.amazon.com/sdk-for-go/api/service/kinesis/#Kinesis.GetRecords
 	// But it's not a constant?
 	ErrCodeKMSThrottlingException = "KMSThrottlingException"
+
+	/**
+	 * Indicates that the entire application is being shutdown, and if desired the record processor will be given a
+	 * final chance to checkpoint. This state will not trigger a direct call to
+	 * {@link com.amazonaws.services.kinesis.clientlibrary.interfaces.v2.IRecordProcessor#shutdown(ShutdownInput)}, but
+	 * instead depend on a different interface for backward compatibility.
+	 */
+	REQUESTED ShutdownReason = iota + 1
+	/**
+	 * Terminate processing for this RecordProcessor (resharding use case).
+	 * Indicates that the shard is closed and all records from the shard have been delivered to the application.
+	 * Applications SHOULD checkpoint their progress to indicate that they have successfully processed all records
+	 * from this shard and processing of child shards can be started.
+	 */
+	TERMINATE
+	/**
+	 * Processing will be moved to a different record processor (fail over, load balancing use cases).
+	 * Applications SHOULD NOT checkpoint their progress (as another record processor may have already started
+	 * processing data).
+	 */
+	ZOMBIE
 )
+
+// Containers for the parameters to the IRecordProcessor
+
+/**
+ * Reason the RecordProcessor is being shutdown.
+ * Used to distinguish between a fail-over vs. a termination (shard is closed and all records have been delivered).
+ * In case of a fail over, applications should NOT checkpoint as part of shutdown,
+ * since another record processor may have already started processing records for that shard.
+ * In case of termination (resharding use case), applications SHOULD checkpoint their progress to indicate
+ * that they have successfully processed all the records (processing of child shards can then begin).
+ */
+type ShutdownReason int
+
+type InitializationInput struct {
+	ShardID                         string
+	ExtendedSequenceNumber          *ExtendedSequenceNumber
+	PendingCheckpointSequenceNumber *ExtendedSequenceNumber
+}
+
+type ProcessRecordsInput struct {
+	CacheEntryTime     *time.Time
+	CacheExitTime      *time.Time
+	Records            []*ks.Record
+	Checkpointer       *RecordProcessorCheckpointer
+	MillisBehindLatest int64
+}
+
+type ShutdownInput struct {
+	ShutdownReason ShutdownReason
+	Checkpointer   *RecordProcessorCheckpointer
+}
+
+var shutdownReasonMap = map[ShutdownReason]*string{
+	REQUESTED: aws.String("REQUESTED"),
+	TERMINATE: aws.String("TERMINATE"),
+	ZOMBIE:    aws.String("ZOMBIE"),
+}
+
+func ShutdownReasonMessage(reason ShutdownReason) *string {
+	return shutdownReasonMap[reason]
+}
+
+// RecordProcessor is the interface for some callback functions invoked by KCL will
+// The main task of using KCL is to provide implementation on RecordProcessor interface.
+// Note: This is exactly the same interface as Amazon KCL RecordProcessor v2
+type RecordProcessor interface {
+	/**
+	 * Invoked by the Amazon Kinesis Client Library before data records are delivered to the RecordProcessor instance
+	 * (via processRecords).
+	 *
+	 * @param initializationInput Provides information related to initialization
+	 */
+	Initialize(ctx context.Context, initializationInput *InitializationInput)
+
+	/**
+	 * Process data records. The Amazon Kinesis Client Library will invoke this method to deliver data records to the
+	 * application.
+	 * Upon fail over, the new instance will get records with sequence number > checkpoint position
+	 * for each partition key.
+	 *
+	 * @param processRecordsInput Provides the records to be processed as well as information and capabilities related
+	 *        to them (eg checkpointing).
+	 */
+	ProcessRecords(ctx context.Context, processRecordsInput *ProcessRecordsInput)
+
+	/**
+	 * Invoked by the Amazon Kinesis Client Library to indicate it will no longer send data records to this
+	 * RecordProcessor instance.
+	 *
+	 * <h2><b>Warning</b></h2>
+	 *
+	 * When the value of {@link ShutdownInput#getShutdownReason()} is
+	 * {@link com.amazonaws.services.kinesis.clientlibrary.lib.worker.ShutdownReason#TERMINATE} it is required that you
+	 * checkpoint. Failure to do so will result in an IllegalArgumentException, and the KCL no longer making progress.
+	 *
+	 * @param shutdownInput
+	 *            Provides information and capabilities (eg checkpointing) related to shutdown of this record processor.
+	 */
+	Shutdown(ctx context.Context, shutdownInput *ShutdownInput)
+}
 
 // ExtendedSequenceNumber represents a two-part sequence number for records aggregated by the Kinesis Producer Library.
 //
@@ -69,20 +171,6 @@ const (
 type ExtendedSequenceNumber struct {
 	SequenceNumber    *string
 	SubSequenceNumber int64
-}
-
-type ShardInfo struct {
-	ID            string
-	ParentShardID string
-
-	// Checkpoint is the last checkpoint.
-	Checkpoint   string
-	AssignedTo   string
-	LeaseTimeout time.Time
-	// Shard Range
-	StartingSequenceNumber string
-	// child shard doesn't have end sequence number
-	EndingSequenceNumber string
 }
 
 // ShardStatus represents a shard consumer's progress in a shard.
@@ -114,7 +202,7 @@ func (ss *ShardStatus) SetLeaseOwner(owner string) {
 	ss.AssignedTo = owner
 }
 
-type ShardConsumerState int
+//type ShardConsumerState int
 
 // ShardConsumer is responsible for consuming data records of a (specified) shard.
 type ShardConsumer struct {
@@ -123,23 +211,23 @@ type ShardConsumer struct {
 	kc              kinesisiface.KinesisAPI
 	checkpointer    Checkpointer
 	recordProcessor RecordProcessor
-	cfg             *KinesisClientLibConfiguration
+	cfg             *ConsumerConfig
 	stop            *chan struct{}
 	consumerID      string
 	metrics         MonitoringService
-	state           ShardConsumerState
+	//state           ShardConsumerState
 }
 
 // run continously poll the shard for records, until the lease ends.
 // entry point for consumer.
 // Precondition: it currently has the lease on the shard.
 func (sc *ShardConsumer) run(ctx context.Context) error {
-	defer sc.releaseLease()
-	log := sc.cfg.Logger
+	defer sc.releaseLease(ctx)
+	log := sc.cfg.Log
 	shard := sc.shard
 
 	// If the shard is child shard, need to wait until the parent finished.
-	if err := sc.waitOnParentShard(); err != nil {
+	if err := sc.waitOnParentShard(ctx); err != nil {
 		// If parent shard has been deleted by Kinesis system already, just ignore the error.
 		if err != ErrSequenceIDNotFound {
 			log.Errorf("Error in waiting for parent shard: %v to finish. Error: %+v", shard.ParentShardId, err)
@@ -154,7 +242,7 @@ func (sc *ShardConsumer) run(ctx context.Context) error {
 	}
 
 	// Start processing events and notify record processor on shard and starting checkpoint
-	sc.recordProcessor.Initialize(&InitializationInput{
+	sc.recordProcessor.Initialize(ctx, &InitializationInput{
 		ShardID:                shard.ID,
 		ExtendedSequenceNumber: &ExtendedSequenceNumber{SequenceNumber: aws.String(shard.Checkpoint)},
 	})
@@ -231,7 +319,7 @@ func (sc *ShardConsumer) run(ctx context.Context) error {
 			processRecordsStartTime := time.Now()
 
 			// Delivery the events to the record processor
-			sc.recordProcessor.ProcessRecords(input)
+			sc.recordProcessor.ProcessRecords(ctx, input)
 
 			// Convert from nanoseconds to milliseconds
 			processedRecordsTiming := time.Since(processRecordsStartTime) / 1000000
@@ -253,7 +341,7 @@ func (sc *ShardConsumer) run(ctx context.Context) error {
 		if getResp.NextShardIterator == nil {
 			log.Infof("Shard %s closed", shard.ID)
 			shutdownInput := &ShutdownInput{ShutdownReason: TERMINATE, Checkpointer: recordCheckpointer}
-			sc.recordProcessor.Shutdown(shutdownInput)
+			sc.recordProcessor.Shutdown(ctx, shutdownInput)
 			return nil
 		}
 		shardIterator = getResp.NextShardIterator
@@ -261,7 +349,7 @@ func (sc *ShardConsumer) run(ctx context.Context) error {
 		select {
 		case <-*sc.stop:
 			shutdownInput := &ShutdownInput{ShutdownReason: REQUESTED, Checkpointer: recordCheckpointer}
-			sc.recordProcessor.Shutdown(shutdownInput)
+			sc.recordProcessor.Shutdown(ctx, shutdownInput)
 			return nil
 		default:
 		}
@@ -269,7 +357,7 @@ func (sc *ShardConsumer) run(ctx context.Context) error {
 }
 
 // Need to wait until the parent shard finished
-func (sc *ShardConsumer) waitOnParentShard() error {
+func (sc *ShardConsumer) waitOnParentShard(ctx context.Context) error {
 	shard := sc.shard
 	if len(shard.ParentShardId) == 0 {
 		return nil
@@ -281,7 +369,7 @@ func (sc *ShardConsumer) waitOnParentShard() error {
 	}
 
 	for {
-		if err := sc.checkpointer.FetchCheckpoint(pshard); err != nil {
+		if err := sc.checkpointer.FetchCheckpoint(ctx, pshard); err != nil {
 			return err
 		}
 
@@ -296,10 +384,10 @@ func (sc *ShardConsumer) waitOnParentShard() error {
 
 func (sc *ShardConsumer) getShardIterator(ctx context.Context) (*string, error) {
 	shard := sc.shard
-	log := sc.cfg.Logger
+	log := sc.cfg.Log
 
 	// Get checkpoint of the shard from dynamoDB
-	err := sc.checkpointer.FetchCheckpoint(shard)
+	err := sc.checkpointer.FetchCheckpoint(ctx, shard)
 	if err != nil && err != ErrSequenceIDNotFound {
 		return nil, err
 	}
@@ -351,15 +439,15 @@ func (sc *ShardConsumer) getShardIterator(ctx context.Context) (*string, error) 
 
 // Cleanup the internal lease cache
 // Mutates shard { SetLeaseOwner }
-func (sc *ShardConsumer) releaseLease() {
-	log := sc.cfg.Logger
+func (sc *ShardConsumer) releaseLease(ctx context.Context) {
+	log := sc.cfg.Log
 	shard := sc.shard
 	log.Infof("Release lease for shard %s", shard.ID)
 	shard.SetLeaseOwner("")
 
 	// Release the lease by wiping out the lease owner for the shard
 	// Note: we don't need to do anything in case of error here and shard lease will eventuall be expired.
-	if err := sc.checkpointer.RemoveLeaseOwner(shard.ID); err != nil {
+	if err := sc.checkpointer.RemoveLeaseOwner(ctx, shard.ID); err != nil {
 		log.Errorf("Failed to release shard lease or shard: %s Error: %+v", shard.ID, err)
 	}
 

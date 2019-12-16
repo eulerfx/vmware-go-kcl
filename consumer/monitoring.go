@@ -34,6 +34,7 @@
 
 package kcl
 
+// MonitoringService is a dictionary of metrics for the consumer library.
 type MonitoringService interface {
 	Init(appName, streamName, workerID string) error
 	Start() error

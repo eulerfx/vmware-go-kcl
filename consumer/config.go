@@ -40,9 +40,9 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
 	creds "github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/vmware/vmware-go-kcl/logger"
+
+	"github.com/vmware/vmware-go-kcl/logger/logger"
 )
 
 const (
@@ -132,130 +132,128 @@ const (
 	DEFAULT_MAX_LIST_SHARDS_RETRY_ATTEMPTS = 50
 )
 
-type (
-	// InitialPositionInStream Used to specify the Position in the stream where a new application should start from
-	// This is used during initial application bootstrap (when a checkpoint doesn't exist for a shard or its parents)
-	InitialPositionInStream int
+// InitialPositionInStream Used to specify the Position in the stream where a new application should start from
+// This is used during initial application bootstrap (when a checkpoint doesn't exist for a shard or its parents)
+type InitialPositionInStream int
 
-	// Class that houses the entities needed to specify the Position in the stream from where a new application should
-	// start.
-	InitialPositionInStreamExtended struct {
-		Position InitialPositionInStream
+// Class that houses the entities needed to specify the Position in the stream from where a new application should
+// start.
+type InitialPositionInStreamExtended struct {
+	Position InitialPositionInStream
 
-		// The time stamp of the data record from which to start reading. Used with
-		// shard iterator type AT_TIMESTAMP. A time stamp is the Unix epoch date with
-		// precision in milliseconds. For example, 2016-04-04T19:58:46.480-00:00 or
-		// 1459799926.480. If a record with this exact time stamp does not exist, the
-		// iterator returned is for the next (later) record. If the time stamp is older
-		// than the current trim horizon, the iterator returned is for the oldest untrimmed
-		// data record (TRIM_HORIZON).
-		Timestamp *time.Time `type:"Timestamp" timestampFormat:"unix"`
-	}
+	// The time stamp of the data record from which to start reading. Used with
+	// shard iterator type AT_TIMESTAMP. A time stamp is the Unix epoch date with
+	// precision in milliseconds. For example, 2016-04-04T19:58:46.480-00:00 or
+	// 1459799926.480. If a record with this exact time stamp does not exist, the
+	// iterator returned is for the next (later) record. If the time stamp is older
+	// than the current trim horizon, the iterator returned is for the oldest untrimmed
+	// data record (TRIM_HORIZON).
+	Timestamp *time.Time `type:"Timestamp" timestampFormat:"unix"`
+}
 
-	// Configuration for the Kinesis Client Library.
-	// Note: There is no need to configure credential provider. Credential can be get from InstanceProfile.
-	KinesisClientLibConfiguration struct {
-		// ApplicationName is name of application. Kinesis allows multiple applications to consume the same stream.
-		ApplicationName string
+// Configuration for the Kinesis Client Library.
+// Note: There is no need to configure credential provider. Credential can be get from InstanceProfile.
+type ConsumerConfig struct {
+	// ApplicationName is name of application. Kinesis allows multiple applications to consume the same stream.
+	ApplicationName string
 
-		// DynamoDBEndpoint is an optional endpoint URL that overrides the default generated endpoint for a DynamoDB client.
-		// If this is empty, the default generated endpoint will be used.
-		DynamoDBEndpoint string
+	// DynamoDBEndpoint is an optional endpoint URL that overrides the default generated endpoint for a DynamoDB client.
+	// If this is empty, the default generated endpoint will be used.
+	DynamoDBEndpoint string
 
-		// KinesisEndpoint is an optional endpoint URL that overrides the default generated endpoint for a Kinesis client.
-		// If this is empty, the default generated endpoint will be used.
-		KinesisEndpoint string
+	// KinesisEndpoint is an optional endpoint URL that overrides the default generated endpoint for a Kinesis client.
+	// If this is empty, the default generated endpoint will be used.
+	KinesisEndpoint string
 
-		// KinesisCredentials is used to access Kinesis
-		KinesisCredentials *creds.Credentials
+	// KinesisCredentials is used to access Kinesis
+	KinesisCredentials *creds.Credentials
 
-		// DynamoDBCredentials is used to access DynamoDB
-		DynamoDBCredentials *creds.Credentials
+	// DynamoDBCredentials is used to access DynamoDB
+	DynamoDBCredentials *creds.Credentials
 
-		// TableName is name of the dynamo db table for managing kinesis stream default to ApplicationName
-		TableName string
+	// TableName is name of the dynamo db table for managing kinesis stream default to ApplicationName
+	TableName string
 
-		// StreamName is the name of Kinesis stream
-		StreamName string
+	// StreamName is the name of Kinesis stream
+	StreamName string
 
-		// WorkerID used to distinguish different workers/processes of a Kinesis application
-		WorkerID string
+	// WorkerID used to distinguish different workers/processes of a Kinesis application
+	WorkerID string
 
-		// InitialPositionInStream specifies the Position in the stream where a new application should start from
-		InitialPositionInStream InitialPositionInStream
+	// InitialPositionInStream specifies the Position in the stream where a new application should start from
+	InitialPositionInStream InitialPositionInStream
 
-		// InitialPositionInStreamExtended provides actual AT_TMESTAMP value
-		InitialPositionInStreamExtended InitialPositionInStreamExtended
+	// InitialPositionInStreamExtended provides actual AT_TMESTAMP value
+	InitialPositionInStreamExtended InitialPositionInStreamExtended
 
-		// credentials to access Kinesis/Dynamo: https://docs.aws.amazon.com/sdk-for-go/api/aws/credentials/
-		// Note: No need to configure here. Use NewEnvCredentials for testing and EC2RoleProvider for production
+	// credentials to access Kinesis/Dynamo: https://docs.aws.amazon.com/sdk-for-go/api/aws/credentials/
+	// Note: No need to configure here. Use NewEnvCredentials for testing and EC2RoleProvider for production
 
-		// FailoverTimeMillis Lease duration (leases not renewed within this period will be claimed by others)
-		FailoverTimeMillis int
+	// FailoverTimeMillis Lease duration (leases not renewed within this period will be claimed by others)
+	FailoverTimeMillis int
 
-		// LeaseRefreshPeriodMillis is the period before the end of lease during which a lease is refreshed by the owner.
-		LeaseRefreshPeriodMillis int
+	// LeaseRefreshPeriodMillis is the period before the end of lease during which a lease is refreshed by the owner.
+	LeaseRefreshPeriodMillis int
 
-		// MaxRecords Max records to read per Kinesis getRecords() call
-		MaxRecords int
+	// MaxRecords Max records to read per Kinesis getRecords() call
+	MaxRecords int
 
-		// IdleTimeBetweenReadsInMillis Idle time between calls to fetch data from Kinesis
-		IdleTimeBetweenReadsInMillis int
+	// IdleTimeBetweenReadsInMillis Idle time between calls to fetch data from Kinesis
+	IdleTimeBetweenReadsInMillis int
 
-		// CallProcessRecordsEvenForEmptyRecordList Call the IRecordProcessor::processRecords() API even if
-		// GetRecords returned an empty record list.
-		CallProcessRecordsEvenForEmptyRecordList bool
+	// CallProcessRecordsEvenForEmptyRecordList Call the IRecordProcessor::processRecords() API even if
+	// GetRecords returned an empty record list.
+	CallProcessRecordsEvenForEmptyRecordList bool
 
-		// ParentShardPollIntervalMillis Wait for this long between polls to check if parent shards are done
-		ParentShardPollIntervalMillis int
+	// ParentShardPollIntervalMillis Wait for this long between polls to check if parent shards are done
+	ParentShardPollIntervalMillis int
 
-		// ShardSyncIntervalMillis Time between tasks to sync leases and Kinesis shards
-		ShardSyncIntervalMillis int
+	// ShardSyncIntervalMillis Time between tasks to sync leases and Kinesis shards
+	ShardSyncIntervalMillis int
 
-		// CleanupTerminatedShardsBeforeExpiry Clean up shards we've finished processing (don't wait for expiration)
-		CleanupTerminatedShardsBeforeExpiry bool
+	// CleanupTerminatedShardsBeforeExpiry Clean up shards we've finished processing (don't wait for expiration)
+	CleanupTerminatedShardsBeforeExpiry bool
 
-		// kinesisClientConfig Client Configuration used by Kinesis client
-		// dynamoDBClientConfig Client Configuration used by DynamoDB client
-		// Note: we will use default client provided by AWS SDK
+	// kinesisClientConfig Client Configuration used by Kinesis client
+	// dynamoDBClientConfig Client Configuration used by DynamoDB client
+	// Note: we will use default client provided by AWS SDK
 
-		// TaskBackoffTimeMillis Backoff period when tasks encounter an exception
-		TaskBackoffTimeMillis int
+	// TaskBackoffTimeMillis Backoff period when tasks encounter an exception
+	TaskBackoffTimeMillis int
 
-		// ValidateSequenceNumberBeforeCheckpointing whether KCL should validate client provided sequence numbers
-		ValidateSequenceNumberBeforeCheckpointing bool
+	// ValidateSequenceNumberBeforeCheckpointing whether KCL should validate client provided sequence numbers
+	ValidateSequenceNumberBeforeCheckpointing bool
 
-		// RegionName The region name for the service
-		RegionName string
+	// RegionName The region name for the service
+	RegionName string
 
-		// ShutdownGraceMillis The number of milliseconds before graceful shutdown terminates forcefully
-		ShutdownGraceMillis int
+	// ShutdownGraceMillis The number of milliseconds before graceful shutdown terminates forcefully
+	ShutdownGraceMillis int
 
-		// Operation parameters
+	// Operation parameters
 
-		// Max leases this Worker can handle at a time
-		MaxLeasesForWorker int
+	// Max leases this Worker can handle at a time
+	MaxLeasesForWorker int
 
-		// Max leases to steal at one time (for load balancing)
-		MaxLeasesToStealAtOneTime int
+	// Max leases to steal at one time (for load balancing)
+	MaxLeasesToStealAtOneTime int
 
-		// Read capacity to provision when creating the lease table (dynamoDB).
-		InitialLeaseTableReadCapacity int
+	// Read capacity to provision when creating the lease table (dynamoDB).
+	InitialLeaseTableReadCapacity int
 
-		// Write capacity to provision when creating the lease table.
-		InitialLeaseTableWriteCapacity int
+	// Write capacity to provision when creating the lease table.
+	InitialLeaseTableWriteCapacity int
 
-		// Worker should skip syncing shards and leases at startup if leases are present
-		// This is useful for optimizing deployments to large fleets working on a stable stream.
-		SkipShardSyncAtWorkerInitializationIfLeasesExist bool
+	// Worker should skip syncing shards and leases at startup if leases are present
+	// This is useful for optimizing deployments to large fleets working on a stable stream.
+	SkipShardSyncAtWorkerInitializationIfLeasesExist bool
 
-		// Logger used to log message.
-		Logger logger.Logger
+	// Log used to log message.
+	Log logger.Logger
 
-		// MonitoringService publishes per worker-scoped metrics.
-		MonitoringService MonitoringService
-	}
-)
+	// MonitoringService publishes per worker-scoped metrics.
+	MonitoringService MonitoringService
+}
 
 var positionMap = map[InitialPositionInStream]*string{
 	LATEST:       aws.String("LATEST"),
@@ -287,21 +285,21 @@ func checkIsValuePositive(key string, value int) {
 	}
 }
 
-// NewKinesisClientLibConfig creates a default KinesisClientLibConfiguration based on the required fields.
-func NewKinesisClientLibConfig(applicationName, streamName, regionName, workerID string) *KinesisClientLibConfiguration {
-	return NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regionName, workerID,
+// NewConsumerConfig creates a default KinesisClientLibConfiguration based on the required fields.
+func NewConsumerConfig(applicationName, streamName, regionName, workerID string) *ConsumerConfig {
+	return NewConsumerConfigWithCredentials(applicationName, streamName, regionName, workerID,
 		nil, nil)
 }
 
-// NewKinesisClientLibConfigWithCredential creates a default KinesisClientLibConfiguration based on the required fields and unique credentials.
-func NewKinesisClientLibConfigWithCredential(applicationName, streamName, regionName, workerID string,
-	creds *credentials.Credentials) *KinesisClientLibConfiguration {
-	return NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regionName, workerID, creds, creds)
+// NewConsumerConfigWithCredential creates a default KinesisClientLibConfiguration based on the required fields and unique credentials.
+func NewConsumerConfigWithCredential(applicationName, streamName, regionName, workerID string,
+	creds *creds.Credentials) *ConsumerConfig {
+	return NewConsumerConfigWithCredentials(applicationName, streamName, regionName, workerID, creds, creds)
 }
 
-// NewKinesisClientLibConfigWithCredentials creates a default KinesisClientLibConfiguration based on the required fields and specific credentials for each service.
-func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regionName, workerID string,
-	kiniesisCreds, dynamodbCreds *credentials.Credentials) *KinesisClientLibConfiguration {
+// NewConsumerConfigWithCredentials creates a default KinesisClientLibConfiguration based on the required fields and specific credentials for each service.
+func NewConsumerConfigWithCredentials(applicationName, streamName, regionName, workerID string,
+	kiniesisCreds, dynamodbCreds *creds.Credentials) *ConsumerConfig {
 	checkIsValueNotEmpty("ApplicationName", applicationName)
 	checkIsValueNotEmpty("StreamName", streamName)
 	checkIsValueNotEmpty("RegionName", regionName)
@@ -311,7 +309,7 @@ func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regio
 	}
 
 	// populate the KCL configuration with default values
-	return &KinesisClientLibConfiguration{
+	return &ConsumerConfig{
 		ApplicationName:                                  applicationName,
 		KinesisCredentials:                               kiniesisCreds,
 		DynamoDBCredentials:                              dynamodbCreds,
@@ -337,59 +335,59 @@ func NewKinesisClientLibConfigWithCredentials(applicationName, streamName, regio
 		InitialLeaseTableReadCapacity:                    DEFAULT_INITIAL_LEASE_TABLE_READ_CAPACITY,
 		InitialLeaseTableWriteCapacity:                   DEFAULT_INITIAL_LEASE_TABLE_WRITE_CAPACITY,
 		SkipShardSyncAtWorkerInitializationIfLeasesExist: DEFAULT_SKIP_SHARD_SYNC_AT_STARTUP_IF_LEASES_EXIST,
-		Logger: logger.GetDefaultLogger(),
+		Log: logger.GetDefaultLogger(),
 	}
 }
 
 // WithKinesisEndpoint is used to provide an alternative Kinesis endpoint
-func (c *KinesisClientLibConfiguration) WithKinesisEndpoint(kinesisEndpoint string) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithKinesisEndpoint(kinesisEndpoint string) *ConsumerConfig {
 	c.KinesisEndpoint = kinesisEndpoint
 	return c
 }
 
 // WithDynamoDBEndpoint is used to provide an alternative DynamoDB endpoint
-func (c *KinesisClientLibConfiguration) WithDynamoDBEndpoint(dynamoDBEndpoint string) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithDynamoDBEndpoint(dynamoDBEndpoint string) *ConsumerConfig {
 	c.DynamoDBEndpoint = dynamoDBEndpoint
 	return c
 }
 
 // WithTableName to provide alternative lease table in DynamoDB
-func (c *KinesisClientLibConfiguration) WithTableName(tableName string) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithTableName(tableName string) *ConsumerConfig {
 	c.TableName = tableName
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithInitialPositionInStream(initialPositionInStream InitialPositionInStream) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithInitialPositionInStream(initialPositionInStream InitialPositionInStream) *ConsumerConfig {
 	c.InitialPositionInStream = initialPositionInStream
 	c.InitialPositionInStreamExtended = *newInitialPosition(initialPositionInStream)
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithTimestampAtInitialPositionInStream(timestamp *time.Time) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithTimestampAtInitialPositionInStream(timestamp *time.Time) *ConsumerConfig {
 	c.InitialPositionInStream = AT_TIMESTAMP
 	c.InitialPositionInStreamExtended = *newInitialPositionAtTimestamp(timestamp)
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithFailoverTimeMillis(failoverTimeMillis int) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithFailoverTimeMillis(failoverTimeMillis int) *ConsumerConfig {
 	checkIsValuePositive("FailoverTimeMillis", failoverTimeMillis)
 	c.FailoverTimeMillis = failoverTimeMillis
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithLeaseRefreshPeriodMillis(leaseRefreshPeriodMillis int) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithLeaseRefreshPeriodMillis(leaseRefreshPeriodMillis int) *ConsumerConfig {
 	checkIsValuePositive("LeaseRefreshPeriodMillis", leaseRefreshPeriodMillis)
 	c.LeaseRefreshPeriodMillis = leaseRefreshPeriodMillis
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithShardSyncIntervalMillis(shardSyncIntervalMillis int) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithShardSyncIntervalMillis(shardSyncIntervalMillis int) *ConsumerConfig {
 	checkIsValuePositive("ShardSyncIntervalMillis", shardSyncIntervalMillis)
 	c.ShardSyncIntervalMillis = shardSyncIntervalMillis
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithMaxRecords(maxRecords int) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithMaxRecords(maxRecords int) *ConsumerConfig {
 	checkIsValuePositive("MaxRecords", maxRecords)
 	c.MaxRecords = maxRecords
 	return c
@@ -397,7 +395,7 @@ func (c *KinesisClientLibConfiguration) WithMaxRecords(maxRecords int) *KinesisC
 
 // WithMaxLeasesForWorker configures maximum lease this worker can handles. It determines how maximun number of shards
 // this worker can handle.
-func (c *KinesisClientLibConfiguration) WithMaxLeasesForWorker(n int) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithMaxLeasesForWorker(n int) *ConsumerConfig {
 	checkIsValuePositive("MaxLeasesForWorker", n)
 	c.MaxLeasesForWorker = n
 	return c
@@ -423,33 +421,33 @@ func (c *KinesisClientLibConfiguration) WithMaxLeasesForWorker(n int) *KinesisCl
  *            how long to sleep between GetRecords calls when no records are returned.
  * @return KinesisClientLibConfiguration
  */
-func (c *KinesisClientLibConfiguration) WithIdleTimeBetweenReadsInMillis(idleTimeBetweenReadsInMillis int) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithIdleTimeBetweenReadsInMillis(idleTimeBetweenReadsInMillis int) *ConsumerConfig {
 	checkIsValuePositive("IdleTimeBetweenReadsInMillis", idleTimeBetweenReadsInMillis)
 	c.IdleTimeBetweenReadsInMillis = idleTimeBetweenReadsInMillis
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithCallProcessRecordsEvenForEmptyRecordList(callProcessRecordsEvenForEmptyRecordList bool) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithCallProcessRecordsEvenForEmptyRecordList(callProcessRecordsEvenForEmptyRecordList bool) *ConsumerConfig {
 	c.CallProcessRecordsEvenForEmptyRecordList = callProcessRecordsEvenForEmptyRecordList
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithTaskBackoffTimeMillis(taskBackoffTimeMillis int) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithTaskBackoffTimeMillis(taskBackoffTimeMillis int) *ConsumerConfig {
 	checkIsValuePositive("TaskBackoffTimeMillis", taskBackoffTimeMillis)
 	c.TaskBackoffTimeMillis = taskBackoffTimeMillis
 	return c
 }
 
-func (c *KinesisClientLibConfiguration) WithLogger(logger logger.Logger) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithLogger(logger logger.Logger) *ConsumerConfig {
 	if logger == nil {
 		log.Panic("Logger cannot be null")
 	}
-	c.Logger = logger
+	c.Log = logger
 	return c
 }
 
 // WithMonitoringService sets the monitoring service to use to publish metrics.
-func (c *KinesisClientLibConfiguration) WithMonitoringService(mService MonitoringService) *KinesisClientLibConfiguration {
+func (c *ConsumerConfig) WithMonitoringService(mService MonitoringService) *ConsumerConfig {
 	// Nil case is handled downward (at worker creation) so no need to do it here.
 	// Plus the user might want to be explicit about passing a nil monitoring service here.
 	c.MonitoringService = mService

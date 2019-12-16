@@ -39,44 +39,14 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	ks "github.com/aws/aws-sdk-go/service/kinesis"
 )
 
 const (
-	LEASE_KEY_KEY                  = "ShardID"
-	LEASE_OWNER_KEY                = "AssignedTo"
-	LEASE_TIMEOUT_KEY              = "LeaseTimeout"
-	CHECKPOINT_SEQUENCE_NUMBER_KEY = "Checkpoint"
-	PARENT_SHARD_ID_KEY            = "ParentShardId"
-
 	// We've completely processed all records in this shard.
 	SHARD_END = "SHARD_END"
 
 	// ErrLeaseNotAquired is returned when we failed to get a lock on the shard
 	ErrLeaseNotAquired = "Lease is already held by another node"
-)
-
-const (
-	/**
-	 * Indicates that the entire application is being shutdown, and if desired the record processor will be given a
-	 * final chance to checkpoint. This state will not trigger a direct call to
-	 * {@link com.amazonaws.services.kinesis.clientlibrary.interfaces.v2.IRecordProcessor#shutdown(ShutdownInput)}, but
-	 * instead depend on a different interface for backward compatibility.
-	 */
-	REQUESTED ShutdownReason = iota + 1
-	/**
-	 * Terminate processing for this RecordProcessor (resharding use case).
-	 * Indicates that the shard is closed and all records from the shard have been delivered to the application.
-	 * Applications SHOULD checkpoint their progress to indicate that they have successfully processed all records
-	 * from this shard and processing of child shards can be started.
-	 */
-	TERMINATE
-	/**
-	 * Processing will be moved to a different record processor (fail over, load balancing use cases).
-	 * Applications SHOULD NOT checkpoint their progress (as another record processor may have already started
-	 * processing data).
-	 */
-	ZOMBIE
 )
 
 // Checkpointer handles checkpointing when a record has been processed
@@ -90,70 +60,21 @@ type Checkpointer interface {
 
 	// CheckpointSequence writes a checkpoint at the designated sequence ID
 	// Does not mutate ShardStatus.
-	CheckpointSequence(*ShardStatus) error
+	CheckpointSequence(context.Context, *ShardStatus) error
 
 	// FetchCheckpoint retrieves the checkpoint for the given shard
 	// Mutates ShardStatus.
-	FetchCheckpoint(*ShardStatus) error
+	FetchCheckpoint(context.Context, *ShardStatus) error
 
 	// RemoveLeaseInfo to remove lease info for shard entry because the shard no longer exists
-	RemoveLeaseInfo(string) error
+	RemoveLeaseInfo(context.Context, string) error
 
 	// RemoveLeaseOwner to remove lease owner for the shard entry to make the shard available for reassignment
-	RemoveLeaseOwner(string) error
+	RemoveLeaseOwner(context.Context, string) error
 }
 
 // ErrSequenceIDNotFound is returned by FetchCheckpoint when no SequenceID is found
 var ErrSequenceIDNotFound = errors.New("SequenceIDNotFoundForShard")
-
-// Containers for the parameters to the IRecordProcessor
-
-/**
- * Reason the RecordProcessor is being shutdown.
- * Used to distinguish between a fail-over vs. a termination (shard is closed and all records have been delivered).
- * In case of a fail over, applications should NOT checkpoint as part of shutdown,
- * since another record processor may have already started processing records for that shard.
- * In case of termination (resharding use case), applications SHOULD checkpoint their progress to indicate
- * that they have successfully processed all the records (processing of child shards can then begin).
- */
-type ShutdownReason int
-
-type InitializationInput struct {
-	ShardID                         string
-	ExtendedSequenceNumber          *ExtendedSequenceNumber
-	PendingCheckpointSequenceNumber *ExtendedSequenceNumber
-}
-
-type ProcessRecordsInput struct {
-	CacheEntryTime     *time.Time
-	CacheExitTime      *time.Time
-	Records            []*ks.Record
-	Checkpointer       *RecordProcessorCheckpointer
-	MillisBehindLatest int64
-}
-
-type ShutdownInput struct {
-	ShutdownReason ShutdownReason
-	Checkpointer   *RecordProcessorCheckpointer
-}
-
-var shutdownReasonMap = map[ShutdownReason]*string{
-	REQUESTED: aws.String("REQUESTED"),
-	TERMINATE: aws.String("TERMINATE"),
-	ZOMBIE:    aws.String("ZOMBIE"),
-}
-
-func ShutdownReasonMessage(reason ShutdownReason) *string {
-	return shutdownReasonMap[reason]
-}
-
-func newInitialPositionAtTimestamp(timestamp *time.Time) *InitialPositionInStreamExtended {
-	return &InitialPositionInStreamExtended{Position: AT_TIMESTAMP, Timestamp: timestamp}
-}
-
-func newInitialPosition(position InitialPositionInStream) *InitialPositionInStreamExtended {
-	return &InitialPositionInStreamExtended{Position: position, Timestamp: nil}
-}
 
 /**
  * Used by RecordProcessors when they want to checkpoint their progress.
@@ -196,7 +117,7 @@ func NewRecordProcessorCheckpointer(shard *ShardStatus, checkpoint Checkpointer)
 // 	 *         greatest sequence number seen by the associated record processor.
 // 	 *         2.) It is not a valid sequence number for a record in this shard.
 // 	 */
-func (rc *RecordProcessorCheckpointer) Checkpoint(sequenceNumber *string) error {
+func (rc *RecordProcessorCheckpointer) Checkpoint(ctx context.Context, sequenceNumber *string) error {
 	rc.shard.mux.Lock()
 
 	// checkpoint the last sequence of a closed shard
@@ -210,7 +131,7 @@ func (rc *RecordProcessorCheckpointer) Checkpoint(sequenceNumber *string) error 
 	rc.shard.mux.Unlock()
 
 	// DOES NOT mutate shard
-	err := rc.checkpoint.CheckpointSequence(rc.shard)
+	err := rc.checkpoint.CheckpointSequence(ctx, rc.shard)
 	if err != nil {
 		return err
 	}
@@ -239,50 +160,18 @@ func (rc *RecordProcessorCheckpointer) Checkpoint(sequenceNumber *string) error 
 // 	 *         greatest sequence number seen by the associated record processor.
 // 	 *         2.) It is not a valid sequence number for a record in this shard.
 // 	 */
-func (rc *RecordProcessorCheckpointer) PrepareCheckpoint(sequenceNumber *string) (func() error, error) {
+func (rc *RecordProcessorCheckpointer) PrepareCheckpoint(ctx context.Context, sequenceNumber *string) (func() error, error) {
 	commit := func() error {
-		rc.Checkpoint(sequenceNumber)
+		rc.Checkpoint(ctx, sequenceNumber)
 		return nil
 	}
 	return commit, nil
-
 }
 
-// RecordProcessor is the interface for some callback functions invoked by KCL will
-// The main task of using KCL is to provide implementation on RecordProcessor interface.
-// Note: This is exactly the same interface as Amazon KCL RecordProcessor v2
-type RecordProcessor interface {
-	/**
-	 * Invoked by the Amazon Kinesis Client Library before data records are delivered to the RecordProcessor instance
-	 * (via processRecords).
-	 *
-	 * @param initializationInput Provides information related to initialization
-	 */
-	Initialize(initializationInput *InitializationInput)
+func newInitialPositionAtTimestamp(timestamp *time.Time) *InitialPositionInStreamExtended {
+	return &InitialPositionInStreamExtended{Position: AT_TIMESTAMP, Timestamp: timestamp}
+}
 
-	/**
-	 * Process data records. The Amazon Kinesis Client Library will invoke this method to deliver data records to the
-	 * application.
-	 * Upon fail over, the new instance will get records with sequence number > checkpoint position
-	 * for each partition key.
-	 *
-	 * @param processRecordsInput Provides the records to be processed as well as information and capabilities related
-	 *        to them (eg checkpointing).
-	 */
-	ProcessRecords(processRecordsInput *ProcessRecordsInput)
-
-	/**
-	 * Invoked by the Amazon Kinesis Client Library to indicate it will no longer send data records to this
-	 * RecordProcessor instance.
-	 *
-	 * <h2><b>Warning</b></h2>
-	 *
-	 * When the value of {@link ShutdownInput#getShutdownReason()} is
-	 * {@link com.amazonaws.services.kinesis.clientlibrary.lib.worker.ShutdownReason#TERMINATE} it is required that you
-	 * checkpoint. Failure to do so will result in an IllegalArgumentException, and the KCL no longer making progress.
-	 *
-	 * @param shutdownInput
-	 *            Provides information and capabilities (eg checkpointing) related to shutdown of this record processor.
-	 */
-	Shutdown(shutdownInput *ShutdownInput)
+func newInitialPosition(position InitialPositionInStream) *InitialPositionInStreamExtended {
+	return &InitialPositionInStreamExtended{Position: position, Timestamp: nil}
 }

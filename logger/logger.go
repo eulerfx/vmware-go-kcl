@@ -21,10 +21,6 @@
 
 package logger
 
-import (
-	"github.com/sirupsen/logrus"
-)
-
 // Fields Type to pass when we want to call WithFields for structured logging
 type Fields map[string]interface{}
 
@@ -92,11 +88,6 @@ type Configuration struct {
 	// backup files is the computer's local time.  The default is to use UTC
 	// time.
 	LocalTime bool
-}
-
-// GetDefaultLogger creates a default logger.
-func GetDefaultLogger() Logger {
-	return NewLogrusLogger(logrus.StandardLogger())
 }
 
 // normalizeConfig to enforce default value in configuration.
